@@ -2,6 +2,7 @@ import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-c
 
 import { readConfig } from "./config.js";
 import { HandoffController } from "./handoff.js";
+import { readHistory } from "./history.js";
 import { launchRepository } from "./launch.js";
 import { decideRepositoryMatch } from "./matcher.js";
 import { pickRepository } from "./picker.js";
@@ -11,7 +12,7 @@ import { runDoctor, runSetup } from "./setup.js";
 const help = [
   "Pi Flash launches a fresh Pi session in an isolated Git worktree.",
   "Usage: /flash [repository query]",
-  "Commands: /flash setup, /flash config, /flash refresh, /flash doctor, /flash help",
+  "Commands: /flash setup, /flash config, /flash refresh, /flash history, /flash doctor, /flash help",
   "A confident query launches immediately; other queries open the picker.",
 ].join("\n");
 
@@ -52,6 +53,20 @@ export default function piFlash(pi: ExtensionAPI): void {
         }
         if (query === "refresh") {
           await refreshWithProgress(ctx, config);
+          return;
+        }
+        if (query === "history") {
+          const history = await readHistory();
+          if (history.length === 0) {
+            ctx.ui.notify("Pi Flash history is empty.", "info");
+            return;
+          }
+          const recent = history.slice(-12).reverse().map((entry) => {
+            const repo = typeof entry.metadata.repo === "string" ? ` ${entry.metadata.repo}` : "";
+            const branch = typeof entry.metadata.branch === "string" ? ` (${entry.metadata.branch})` : "";
+            return `${entry.at}  ${entry.event}${repo}${branch}`;
+          });
+          ctx.ui.notify(recent.join("\n"), "info");
           return;
         }
         const index = await ensureRepositoryIndex(config);

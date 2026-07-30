@@ -4,7 +4,9 @@ import type { Config } from "./config.js";
 import { prepareWorkspace, type WorkspacePreparation } from "./git-workspace.js";
 import { getGitHubLogin } from "./github.js";
 import { HandoffController } from "./handoff.js";
+import { recordCreatedWorktree, appendHistory } from "./history.js";
 import type { RepositoryIndexEntry } from "./index-store.js";
+import { registerWorktree } from "./registry.js";
 
 /**
  * Does all network/Git work before scheduling the single process handoff. A
@@ -28,7 +30,15 @@ export async function launchRepository(
     const request = controller.preflight("/");
     const workspace = await prepareWorkspace(repository, config, login);
     request.targetCwd = workspace.worktreePath;
+    const record = await registerWorktree(repository, workspace);
+    await recordCreatedWorktree(record, repository, workspace);
     controller.schedule(request);
+    await appendHistory({
+      version: 1,
+      at: new Date().toISOString(),
+      event: "handoff-scheduled",
+      metadata: { id: record.id, repo: repository.nameWithOwner, branch: workspace.branch, path: workspace.worktreePath },
+    });
     if (workspace.stale) {
       ctx.ui.notify(
         `Git fetch failed after ${workspace.attempts} attempts. Launching cached ${workspace.baseSha.slice(0, 12)} from ${workspace.lastFetchedAt}.`,
