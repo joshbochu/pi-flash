@@ -37,6 +37,32 @@ describe("Git worktree preparation", () => {
     expect(await readFile(join(second.worktreePath, "README.md"), "utf8")).toBe("second\n");
   });
 
+  it("serializes concurrent first launches while preserving distinct worktrees", async () => {
+    const sandbox = await createRepositorySandbox();
+    const config = createWorkspaceConfig(sandbox.workspaceRoot);
+    const repository = indexedRepository();
+
+    const [first, second] = await Promise.all([
+      prepareWorkspace(repository, config, "josh", {
+        remoteUrl: sandbox.remoteUrl,
+        createPetName: () => "brisk-otter-000001",
+      }),
+      prepareWorkspace(repository, config, "josh", {
+        remoteUrl: sandbox.remoteUrl,
+        createPetName: () => "calm-wren-000002",
+      }),
+    ]);
+
+    expect(first.barePath).toBe(second.barePath);
+    expect(first.worktreePath).not.toBe(second.worktreePath);
+    expect(new Set([first.branch, second.branch])).toEqual(new Set([
+      "josh/brisk-otter-000001",
+      "josh/calm-wren-000002",
+    ]));
+    await expect(readFile(join(first.worktreePath, "README.md"), "utf8")).resolves.toBe("first\n");
+    await expect(readFile(join(second.worktreePath, "README.md"), "utf8")).resolves.toBe("first\n");
+  });
+
   it("retries a failed fetch and launches from a verified cached default branch", async () => {
     const sandbox = await createRepositorySandbox();
     const config = createWorkspaceConfig(sandbox.workspaceRoot);

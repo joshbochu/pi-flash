@@ -1,6 +1,3 @@
-import { homedir } from "node:os";
-import { join } from "node:path";
-
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { getSettingsListTheme } from "@earendil-works/pi-coding-agent";
 import { Container, SettingsList, Text, type SettingItem } from "@earendil-works/pi-tui";
@@ -34,18 +31,34 @@ export async function runSetup(ctx: ExtensionCommandContext): Promise<SetupResul
     const enabledOwners = await chooseSources(ctx, owners, identity.login, existing?.sources ?? {});
     if (!enabledOwners) return undefined;
 
+    const config = existing ?? createDefaultConfig();
+    const defaultRoot = config.workspaceRoot;
     const requestedRoot = await ctx.ui.input(
-      "Pi Flash workspace root",
-      existing?.workspaceRoot ?? join(homedir(), "dev"),
+      `Pi Flash workspace root [${defaultRoot}]`,
+      "Press Enter to use the path shown above",
     );
     if (requestedRoot === undefined) return undefined;
 
-    const root = await chooseWorkspaceRoot(ctx, requestedRoot);
+    const autoLaunchThreshold = await chooseMatchingScore(
+      ctx,
+      "Auto-launch confidence (0–1)",
+      config.matching.autoLaunchThreshold,
+    );
+    if (autoLaunchThreshold === undefined) return undefined;
+    const minimumLeadOverSecond = await chooseMatchingScore(
+      ctx,
+      "Minimum lead over second result (0–1)",
+      config.matching.minimumLeadOverSecond,
+    );
+    if (minimumLeadOverSecond === undefined) return undefined;
+
+    const root = await chooseWorkspaceRoot(ctx, requestedRoot.trim() === "" ? defaultRoot : requestedRoot);
     if (!root) return undefined;
 
-    const config = existing ?? createDefaultConfig();
     config.workspaceRoot = root.path;
     config.sources = Object.fromEntries(owners.map((owner) => [owner, enabledOwners.has(owner)]));
+    config.matching.autoLaunchThreshold = autoLaunchThreshold;
+    config.matching.minimumLeadOverSecond = minimumLeadOverSecond;
     const saved = await writeConfig(config, { createWorkspaceRoot: root.created });
     ctx.ui.notify(
       `Pi Flash is ready. ${[...enabledOwners].length} source${enabledOwners.size === 1 ? "" : "s"} enabled; worktrees will live under ${saved.workspaceRoot}.`,
@@ -63,11 +76,15 @@ export async function runDoctor(ctx: ExtensionCommandContext): Promise<void> {
   const checks = await Promise.allSettled([requireCommand("git"), requireCommand("gh"), requireCommand("pi"), discoverGitHubIdentity(), readConfig()]);
   const labels = ["git", "gh", "pi", "GitHub authentication", "Pi Flash configuration"];
   const report = checks.map((check, index) => {
-    if (check.status === "fulfilled") return `✓ ${labels[index]}`;
+    if (check.status === "fulfilled") {
+      if (index === 4 && check.value === undefined) return `✗ ${labels[index]}: run /flash setup`;
+      return `✓ ${labels[index]}`;
+    }
     const detail = check.reason instanceof Error ? check.reason.message : String(check.reason);
     return `✗ ${labels[index]}: ${detail}`;
   });
-  ctx.ui.notify(report.join("\n"), checks.every((check) => check.status === "fulfilled") ? "info" : "warning");
+  const healthy = checks.every((check, index) => check.status === "fulfilled" && (index !== 4 || check.value !== undefined));
+  ctx.ui.notify(report.join("\n"), healthy ? "info" : "warning");
 }
 
 function ensureInteractive(ctx: ExtensionCommandContext): void {
@@ -148,5 +165,24 @@ async function chooseWorkspaceRoot(
     );
     if (!create) return undefined;
     return { path: await validateWorkspaceRoot(requestedRoot, { createIfMissing: true }), created: true };
+  }
+}
+
+async function chooseMatchingScore(
+  ctx: ExtensionCommandContext,
+  title: string,
+  currentValue: number,
+): Promise<number | undefined> {
+  while (true) {
+    const input = await ctx.ui.input(
+      `${title} [${currentValue}]`,
+      "Press Enter to keep the value shown above",
+    );
+    if (input === undefined) return undefined;
+    if (input.trim() === "") return currentValue;
+
+    const value = Number(input);
+    if (Number.isFinite(value) && value >= 0 && value <= 1) return value;
+    ctx.ui.notify("Enter a number from 0 to 1, or press Enter to keep the current value.", "warning");
   }
 }

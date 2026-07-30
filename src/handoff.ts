@@ -64,7 +64,15 @@ export function startReplacement(request: ReplacementRequest): ChildProcess {
     'target_cwd="$2"',
     'launcher="$3"',
     "shift 3",
-    "while kill -0 \"$parent_pid\" 2>/dev/null; do sleep 0.05; done",
+    "attempts=0",
+    "while kill -0 \"$parent_pid\" 2>/dev/null; do",
+    "  attempts=$((attempts + 1))",
+    "  if [ \"$attempts\" -ge 1200 ]; then",
+    '    echo "Pi Flash handoff timed out waiting for the initiating Pi to exit." >&2',
+    "    exit 124",
+    "  fi",
+    "  sleep 0.05",
+    "done",
     'cd "$target_cwd" || exit 126',
     'exec "$launcher" "$@"',
   ].join("\n");
@@ -73,6 +81,11 @@ export function startReplacement(request: ReplacementRequest): ChildProcess {
     ["-c", script, "pi-flash-handoff", String(parentPid), request.targetCwd, request.invocation.command, ...request.invocation.args],
     { cwd: request.targetCwd, env: createFreshPiEnvironment(request.env), stdio: "inherit", detached: false },
   );
+  child.once("error", (error) => {
+    // Pi has already restored the terminal by the time this child is expected
+    // to run. stderr is the only reliable recovery channel left to us.
+    process.stderr.write(`Pi Flash could not start the replacement Pi: ${error.message}\n`);
+  });
   child.unref();
   return child;
 }

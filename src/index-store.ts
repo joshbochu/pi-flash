@@ -91,6 +91,7 @@ export async function refreshRepositoryIndex(
   const seen = new Set<string>();
   const repos = allRepos
     .filter((entry) => isActiveRepository(entry))
+    .filter((entry) => hasDefaultBranch(entry))
     .map((entry) => parseRepositoryEntry(entry, seen))
     .sort((left, right) => left.nameWithOwner.localeCompare(right.nameWithOwner));
   const index: RepositoryIndex = {
@@ -129,12 +130,15 @@ export async function listOwnerRepositories(owner: string): Promise<unknown[]> {
     "list",
     owner,
     "--limit",
-    "1000",
+    "100000",
     "--json",
     "nameWithOwner,name,owner,defaultBranchRef,description,isArchived",
-  ], { timeoutMs: 60_000 });
+  ], { timeoutMs: 60_000, maxOutputBytes: 64 * 1024 * 1024 });
   if (result.code !== 0) {
     throw new CommandError(`Could not list repositories for ${owner}.`, result);
+  }
+  if (result.stdoutTruncated) {
+    throw new IndexError(`GitHub returned too much repository data for ${owner}; the index was left unchanged.`);
   }
   try {
     const value: unknown = JSON.parse(result.stdout);
@@ -147,6 +151,17 @@ export async function listOwnerRepositories(owner: string): Promise<unknown[]> {
 
 function isActiveRepository(value: unknown): boolean {
   return typeof value === "object" && value !== null && (value as Record<string, unknown>).isArchived !== true;
+}
+
+/**
+ * GitHub reports an empty repository with a null defaultBranchRef. Empty
+ * repositories cannot produce a worktree yet, so leave them out of the cache
+ * without allowing one of them to abort an otherwise healthy owner refresh.
+ */
+function hasDefaultBranch(value: unknown): boolean {
+  if (typeof value !== "object" || value === null) return true;
+  const defaultBranchRef = (value as Record<string, unknown>).defaultBranchRef;
+  return defaultBranchRef !== null;
 }
 
 function parseRepositoryEntry(value: unknown, seen: Set<string>): RepositoryIndexEntry {

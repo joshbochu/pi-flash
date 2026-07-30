@@ -1,10 +1,11 @@
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { access, mkdir, stat } from "node:fs/promises";
 import { join } from "node:path";
 
 import type { Config } from "./config.js";
 import type { RepositoryIndexEntry } from "./index-store.js";
 import { runCommand, type CommandResult } from "./process.js";
+import { StateLockError, withFileLock } from "./state-lock.js";
 
 export interface WorkspacePreparation {
   barePath: string;
@@ -48,6 +49,32 @@ export async function prepareWorkspace(
   assertSafeBranchComponent(branchNamespace, "branch namespace");
   assertSafeBranchComponent(repository.defaultBranch, "default branch");
 
+  const repositoryLock = join(
+    config.workspaceRoot,
+    ".flash",
+    "locks",
+    `${createHash("sha256").update(repository.nameWithOwner.toLowerCase()).digest("hex")}.lock`,
+  );
+  try {
+    return await withFileLock(
+      repositoryLock,
+      () => prepareWorkspaceLocked(repository, config, branchNamespace, options),
+      { lockTimeoutMs: 300_000, lockRetryMs: 50 },
+    );
+  } catch (error: unknown) {
+    if (error instanceof StateLockError) {
+      throw new GitWorkspaceError("Could not lock the shared repository while preparing a worktree.", { cause: error });
+    }
+    throw error;
+  }
+}
+
+async function prepareWorkspaceLocked(
+  repository: RepositoryIndexEntry,
+  config: Config,
+  branchNamespace: string,
+  options: WorkspacePreparationOptions,
+): Promise<WorkspacePreparation> {
   const remoteUrl = options.remoteUrl ?? `https://github.com/${repository.nameWithOwner}.git`;
   const barePath = join(config.workspaceRoot, ".flash", "repos", repository.owner, `${repository.name}.git`);
   const worktreeParent = join(config.workspaceRoot, "worktrees", repository.owner, repository.name);

@@ -23,12 +23,13 @@ export async function launchRepository(
   if (!ctx.isIdle() || ctx.hasPendingMessages()) throw new Error("Wait for Pi to become idle before launching a fresh worktree");
 
   const login = config.branchNamespace ?? await getGitHubLogin();
+  let workspace: WorkspacePreparation | undefined;
   ctx.ui.setWorkingMessage(`Preparing ${repository.nameWithOwner}…`);
   try {
     // Preflight before creating the worktree so an unavailable launcher cannot
     // strand a newly created directory.
     const request = controller.preflight(config.workspaceRoot);
-    const workspace = await prepareWorkspace(repository, config, login);
+    workspace = await prepareWorkspace(repository, config, login);
     request.targetCwd = workspace.worktreePath;
     const record = await registerWorktree(repository, workspace);
     await recordCreatedWorktree(record, repository, workspace);
@@ -51,6 +52,12 @@ export async function launchRepository(
     return workspace;
   } catch (error) {
     controller.cancel();
+    if (workspace) {
+      throw new Error(
+        `Pi Flash could not complete the handoff. The isolated worktree was kept at ${workspace.worktreePath}.`,
+        { cause: error instanceof Error ? error : undefined },
+      );
+    }
     throw error;
   } finally {
     ctx.ui.setWorkingMessage();

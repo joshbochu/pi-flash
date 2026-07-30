@@ -1,25 +1,27 @@
 import { randomUUID } from "node:crypto";
 import { chmod, mkdir, open, readFile, rename, unlink } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 
 import { getFlashStateDirectory, type ConfigLocationOptions } from "./config.js";
 import type { WorkspacePreparation } from "./git-workspace.js";
 import type { RepositoryIndexEntry } from "./index-store.js";
+import { getProcessIdentity, isPidAlive, StateLockError, type StateLockOptions, withFileLock } from "./state-lock.js";
 
 export const REGISTRY_VERSION = 1;
 
 export type WorktreeStatus = "active" | "parked" | "removed";
-export type CleanupOperationStatus = "planned" | "committed" | "pushed" | "remote-verified" | "removed" | "recorded";
+export type CleanupOperationStatus = "planned" | "committed" | "pushed" | "remote-verified" | "removed" | "recorded" | "aborted";
 
 export interface WorktreeRecord {
   id: string;
   repo: string;
+  barePath: string;
   path: string;
   branch: string;
   base: { sha: string; stale: boolean; fetchedAt: string };
   createdAt: string;
   lastUsedAt: string;
-  activeLease: { pid: number; heartbeatAt: string } | null;
+  activeLease: { pid: number; heartbeatAt: string; processIdentity?: string } | null;
   status: WorktreeStatus;
 }
 
@@ -39,6 +41,29 @@ export interface CleanupOperation {
   updatedAt: string;
 }
 
+export interface RegistryMutationOptions extends ConfigLocationOptions, StateLockOptions {
+  now?: () => Date;
+  id?: () => string;
+}
+
+export type CleanupClaimResult =
+  | { claimed: true; record: WorktreeRecord; operation: CleanupOperation }
+  | { claimed: false; reason: "not-found" | "not-active" | "active-session" };
+
+export interface IncompleteCleanup {
+  operation: CleanupOperation;
+  record: WorktreeRecord;
+}
+
+export interface CleanupClaim {
+  operation: CleanupOperation;
+  record: WorktreeRecord;
+}
+
+export interface CompleteCleanupRemovalOptions extends RegistryMutationOptions {
+  remove: (claim: CleanupClaim) => Promise<void>;
+}
+
 export class RegistryError extends Error {
   public constructor(message: string, options?: ErrorOptions) {
     super(message, options);
@@ -50,7 +75,15 @@ export function getRegistryPath(options: ConfigLocationOptions = {}): string {
   return join(getFlashStateDirectory(options), "registry.json");
 }
 
+export function getRegistryLockPath(options: ConfigLocationOptions = {}): string {
+  return join(getFlashStateDirectory(options), "registry.lock");
+}
+
 export async function readRegistry(options: ConfigLocationOptions = {}): Promise<WorktreeRegistry> {
+  return readRegistryUnlocked(options);
+}
+
+async function readRegistryUnlocked(options: ConfigLocationOptions): Promise<WorktreeRegistry> {
   let content: string;
   try {
     content = await readFile(getRegistryPath(options), "utf8");
@@ -81,7 +114,7 @@ export function parseRegistry(value: unknown): WorktreeRegistry {
   return { version: REGISTRY_VERSION, worktrees, operations };
 }
 
-export async function writeRegistry(registry: WorktreeRegistry, options: ConfigLocationOptions = {}): Promise<void> {
+async function writeRegistryUnlocked(registry: WorktreeRegistry, options: ConfigLocationOptions): Promise<void> {
   const parsed = parseRegistry(registry);
   const stateDirectory = getFlashStateDirectory(options);
   const destination = getRegistryPath(options);
@@ -99,16 +132,13 @@ export async function writeRegistry(registry: WorktreeRegistry, options: ConfigL
 export async function registerWorktree(
   repository: RepositoryIndexEntry,
   workspace: WorkspacePreparation,
-  options: ConfigLocationOptions & { now?: () => Date; id?: () => string } = {},
+  options: RegistryMutationOptions = {},
 ): Promise<WorktreeRecord> {
-  const registry = await readRegistry(options);
-  if (registry.worktrees.some((record) => record.path === workspace.worktreePath && record.status !== "removed")) {
-    throw new RegistryError(`Pi Flash already tracks a worktree at ${workspace.worktreePath}.`);
-  }
   const now = (options.now?.() ?? new Date()).toISOString();
   const record: WorktreeRecord = {
     id: options.id?.() ?? randomUUID(),
     repo: repository.nameWithOwner,
+    barePath: workspace.barePath,
     path: workspace.worktreePath,
     branch: workspace.branch,
     base: { sha: workspace.baseSha, stale: workspace.stale, fetchedAt: workspace.lastFetchedAt },
@@ -117,70 +147,254 @@ export async function registerWorktree(
     activeLease: null,
     status: "active",
   };
-  registry.worktrees.push(record);
-  await writeRegistry(registry, options);
-  return record;
+  return transactRegistry(options, (registry) => {
+    if (registry.worktrees.some((current) => current.path === workspace.worktreePath && current.status !== "removed")) {
+      throw new RegistryError(`Pi Flash already tracks a worktree at ${workspace.worktreePath}.`);
+    }
+    registry.worktrees.push(record);
+    return record;
+  });
 }
 
-export async function updateWorktreeRecord(
-  id: string,
-  mutate: (record: WorktreeRecord) => WorktreeRecord,
-  options: ConfigLocationOptions = {},
-): Promise<WorktreeRecord> {
-  const registry = await readRegistry(options);
-  const index = registry.worktrees.findIndex((record) => record.id === id);
-  if (index < 0) throw new RegistryError(`Pi Flash does not track worktree ${id}.`);
-  const current = registry.worktrees[index]!;
-  const updated = mutate(current);
-  registry.worktrees[index] = parseWorktreeRecord(updated, new Set(registry.worktrees.filter((record) => record.id !== id).map((record) => record.id)), new Set(registry.worktrees.filter((record) => record.id !== id).map((record) => record.path)));
-  await writeRegistry(registry, options);
-  return registry.worktrees[index]!;
+export async function setWorktreeLeaseForPath(path: string, pid: number, options: RegistryMutationOptions = {}): Promise<boolean> {
+  const processIdentity = await getProcessIdentity(pid, options);
+  return transactRegistry(options, (registry) => {
+    const record = registry.worktrees.find((candidate) => candidate.path === path && candidate.status !== "removed");
+    if (!record) return false;
+    const heartbeatAt = (options.now?.() ?? new Date()).toISOString();
+    record.activeLease = { pid, heartbeatAt, ...(processIdentity === null ? {} : { processIdentity }) };
+    record.lastUsedAt = heartbeatAt;
+    // Starting Pi in a claimed worktree cancels cleanup before it mutates Git.
+    if (record.status === "parked") {
+      record.status = "active";
+      for (const operation of registry.operations) {
+        if (
+          operation.worktreeId === record.id
+          && operation.status !== "aborted"
+          && operation.status !== "recorded"
+        ) {
+          operation.status = "aborted";
+          operation.updatedAt = heartbeatAt;
+        }
+      }
+    }
+    return true;
+  }, (managed) => managed);
 }
 
-export async function setWorktreeLeaseForPath(path: string, pid: number, options: ConfigLocationOptions & { now?: () => Date } = {}): Promise<void> {
-  const registry = await readRegistry(options);
-  const record = registry.worktrees.find((candidate) => candidate.path === path && candidate.status === "active");
-  if (!record) return;
-  record.activeLease = { pid, heartbeatAt: (options.now?.() ?? new Date()).toISOString() };
-  record.lastUsedAt = record.activeLease.heartbeatAt;
-  await writeRegistry(registry, options);
-}
-
-export async function clearWorktreeLeaseForPath(path: string, pid: number, options: ConfigLocationOptions = {}): Promise<void> {
-  const registry = await readRegistry(options);
-  const record = registry.worktrees.find((candidate) => candidate.path === path && candidate.activeLease?.pid === pid);
-  if (!record) return;
-  record.activeLease = null;
-  await writeRegistry(registry, options);
-}
-
-export async function createCleanupOperation(
-  record: WorktreeRecord,
-  options: ConfigLocationOptions & { now?: () => Date; id?: () => string } = {},
-): Promise<CleanupOperation> {
-  const registry = await readRegistry(options);
-  const now = (options.now?.() ?? new Date()).toISOString();
-  const operation: CleanupOperation = { id: options.id?.() ?? randomUUID(), worktreeId: record.id, branch: record.branch, status: "planned", commit: null, startedAt: now, updatedAt: now };
-  registry.operations.push(operation);
-  await writeRegistry(registry, options);
-  return operation;
+export async function clearWorktreeLeaseForPath(path: string, pid: number, options: RegistryMutationOptions = {}): Promise<void> {
+  await transactRegistry(options, (registry) => {
+    const record = registry.worktrees.find((candidate) => candidate.path === path && candidate.activeLease?.pid === pid);
+    if (!record) return false;
+    record.activeLease = null;
+    return true;
+  }, (cleared) => cleared);
 }
 
 export async function advanceCleanupOperation(
   id: string,
   status: CleanupOperationStatus,
   commit: string | null,
-  options: ConfigLocationOptions & { now?: () => Date } = {},
+  options: RegistryMutationOptions = {},
 ): Promise<CleanupOperation> {
+  return transactRegistry(options, (registry) => {
+    const index = registry.operations.findIndex((operation) => operation.id === id);
+    if (index < 0) throw new RegistryError(`Pi Flash does not track cleanup operation ${id}.`);
+    const current = registry.operations[index]!;
+    if (status !== "planned" && status !== "aborted" && commit === null) {
+      throw new RegistryError("Verified cleanup stages require a commit.");
+    }
+    if (current.commit !== null && commit !== current.commit) {
+      throw new RegistryError("A cleanup operation cannot change its parked commit.");
+    }
+    assertCleanupTransition(current.status, status);
+    const updated = { ...current, status, commit, updatedAt: (options.now?.() ?? new Date()).toISOString() };
+    registry.operations[index] = updated;
+    return updated;
+  });
+}
+
+/**
+ * Atomically refreshes a cleanup candidate, rejects any live lease, changes
+ * active -> parked, and records the durable planned operation. Filesystem and
+ * Git checks happen after this claim; releaseCleanupClaim returns an unmutated
+ * worktree to active when those checks fail.
+ */
+export async function claimWorktreeForCleanup(id: string, options: RegistryMutationOptions = {}): Promise<CleanupClaimResult> {
+  return transactRegistry(options, async (registry) => {
+    const record = registry.worktrees.find((candidate) => candidate.id === id);
+    if (!record) return { claimed: false, reason: "not-found" };
+    if (record.status !== "active") return { claimed: false, reason: "not-active" };
+    if (record.activeLease !== null) {
+      if (await isLeaseActive(record.activeLease, options)) return { claimed: false, reason: "active-session" };
+      record.activeLease = null;
+    }
+    record.status = "parked";
+    const operation = newCleanupOperation(record, options);
+    registry.operations.push(operation);
+    return { claimed: true, record: structuredClone(record), operation };
+  }, (claim) => claim.claimed);
+}
+
+/**
+ * Releases only the matching parked claim. Requiring the operation id prevents
+ * an old cleanup attempt from releasing a newer claim.
+ */
+export async function releaseCleanupClaim(
+  id: string,
+  operationId: string,
+  options: RegistryMutationOptions = {},
+): Promise<WorktreeRecord | null> {
+  return transactRegistry(options, (registry) => {
+    const record = registry.worktrees.find((candidate) => candidate.id === id);
+    const operation = registry.operations.find((candidate) => candidate.id === operationId && candidate.worktreeId === id);
+    if (!record || !operation || record.status !== "parked" || operation.status !== "planned") return null;
+    record.status = "active";
+    operation.status = "aborted";
+    operation.updatedAt = (options.now?.() ?? new Date()).toISOString();
+    return structuredClone(record);
+  }, (record) => record !== null);
+}
+
+/**
+ * Performs the final locked claim check before a destructive cleanup step.
+ * Callers should use the returned fresh paths rather than a prior scan record.
+ */
+export async function validateCleanupClaim(
+  id: string,
+  operationId: string,
+  requiredOperationStatus?: CleanupOperationStatus,
+  options: RegistryMutationOptions = {},
+): Promise<CleanupClaim | null> {
+  return withRegistryLock(options, async () => {
+    const registry = await readRegistryUnlocked(options);
+    const record = registry.worktrees.find((candidate) => candidate.id === id);
+    const operation = registry.operations.find((candidate) => candidate.id === operationId && candidate.worktreeId === id);
+    if (
+      !record
+      || !operation
+      || record.status !== "parked"
+      || record.activeLease !== null
+      || operation.status === "aborted"
+      || operation.status === "recorded"
+      || (requiredOperationStatus !== undefined && operation.status !== requiredOperationStatus)
+    ) return null;
+    return { record: structuredClone(record), operation: structuredClone(operation) };
+  });
+}
+
+/**
+ * Holds the registry lock across the last claim check and worktree removal.
+ * A Pi session therefore cannot acquire a lease in the gap between validation
+ * and the destructive Git command.
+ */
+export async function completeCleanupRemoval(
+  id: string,
+  operationId: string,
+  options: CompleteCleanupRemovalOptions,
+): Promise<CleanupOperation> {
+  return withRegistryLock(options, async () => {
+    const registry = await readRegistryUnlocked(options);
+    const record = registry.worktrees.find((candidate) => candidate.id === id);
+    const operation = registry.operations.find((candidate) => candidate.id === operationId && candidate.worktreeId === id);
+    if (
+      !record
+      || !operation
+      || record.status !== "parked"
+      || record.activeLease !== null
+      || operation.status !== "remote-verified"
+    ) {
+      throw new RegistryError("The cleanup claim changed before worktree removal. Pi Flash kept the worktree.");
+    }
+
+    await options.remove({
+      record: structuredClone(record),
+      operation: structuredClone(operation),
+    });
+
+    const now = (options.now?.() ?? new Date()).toISOString();
+    record.status = "removed";
+    operation.status = "removed";
+    operation.updatedAt = now;
+    await writeRegistryUnlocked(registry, options);
+    return structuredClone(operation);
+  });
+}
+
+/** Clears only leases that are conclusively dead or belong to a recycled PID. */
+export async function recoverStaleWorktreeLeases(options: RegistryMutationOptions = {}): Promise<number> {
+  return transactRegistry(options, async (registry) => {
+    let recovered = 0;
+    for (const record of registry.worktrees) {
+      if (record.activeLease !== null && !(await isLeaseActive(record.activeLease, options))) {
+        record.activeLease = null;
+        recovered += 1;
+      }
+    }
+    return recovered;
+  }, (recovered) => recovered > 0);
+}
+
+/** Returns durable, non-terminal cleanup work for a startup reconciler. */
+export async function listIncompleteCleanupOperations(options: ConfigLocationOptions = {}): Promise<IncompleteCleanup[]> {
   const registry = await readRegistry(options);
-  const index = registry.operations.findIndex((operation) => operation.id === id);
-  if (index < 0) throw new RegistryError(`Pi Flash does not track cleanup operation ${id}.`);
-  const current = registry.operations[index]!;
-  if (cleanupStatusIndex(status) < cleanupStatusIndex(current.status)) throw new RegistryError("Cleanup operations cannot move backward.");
-  const updated = { ...current, status, commit, updatedAt: (options.now?.() ?? new Date()).toISOString() };
-  registry.operations[index] = updated;
-  await writeRegistry(registry, options);
-  return updated;
+  const worktrees = new Map(registry.worktrees.map((record) => [record.id, record]));
+  return registry.operations.flatMap((operation) => {
+    if (operation.status === "recorded" || operation.status === "aborted") return [];
+    const record = worktrees.get(operation.worktreeId);
+    return record ? [{ operation, record }] : [];
+  });
+}
+
+async function transactRegistry<T>(
+  options: RegistryMutationOptions,
+  mutate: (registry: WorktreeRegistry) => T | Promise<T>,
+  shouldWrite: (result: T) => boolean = () => true,
+): Promise<T> {
+  return withRegistryLock(options, async () => {
+    const registry = await readRegistryUnlocked(options);
+    const result = await mutate(registry);
+    if (shouldWrite(result)) await writeRegistryUnlocked(registry, options);
+    return result;
+  });
+}
+
+async function withRegistryLock<T>(options: RegistryMutationOptions, action: () => Promise<T>): Promise<T> {
+  try {
+    return await withFileLock(getRegistryLockPath(options), action, options);
+  } catch (error: unknown) {
+    if (error instanceof StateLockError) {
+      throw new RegistryError("Could not lock the Pi Flash worktree registry.", { cause: error });
+    }
+    throw error;
+  }
+}
+
+function newCleanupOperation(record: WorktreeRecord, options: RegistryMutationOptions): CleanupOperation {
+  const now = (options.now?.() ?? new Date()).toISOString();
+  return {
+    id: options.id?.() ?? randomUUID(),
+    worktreeId: record.id,
+    branch: record.branch,
+    status: "planned",
+    commit: null,
+    startedAt: now,
+    updatedAt: now,
+  };
+}
+
+async function isLeaseActive(
+  lease: NonNullable<WorktreeRecord["activeLease"]>,
+  options: RegistryMutationOptions,
+): Promise<boolean> {
+  if (!isPidAlive(lease.pid, options)) return false;
+  // Legacy leases do not carry a PID identity. A live legacy PID is retained:
+  // expiring it based on age alone could remove an active user's worktree.
+  if (lease.processIdentity === undefined) return true;
+  const currentIdentity = await getProcessIdentity(lease.pid, options);
+  // Failure to ask the OS is not proof of death.
+  if (currentIdentity === null) return true;
+  return currentIdentity === lease.processIdentity;
 }
 
 async function atomicWrite(destination: string, content: string): Promise<void> {
@@ -204,12 +418,15 @@ async function atomicWrite(destination: string, content: string): Promise<void> 
 
 function parseWorktreeRecord(value: unknown, ids: Set<string>, paths: Set<string>): WorktreeRecord {
   const object = requireObject(value, "worktree record");
-  rejectUnknown(object, ["id", "repo", "path", "branch", "base", "createdAt", "lastUsedAt", "activeLease", "status"], "worktree record");
+  rejectUnknown(object, ["id", "repo", "barePath", "path", "branch", "base", "createdAt", "lastUsedAt", "activeLease", "status"], "worktree record");
   const id = requireUuid(object.id, "worktree record.id");
   if (ids.has(id)) throw new RegistryError("The worktree registry has duplicate ids.");
   ids.add(id);
   const repo = requireRepo(object.repo, "worktree record.repo");
   const path = requireAbsolutePath(object.path, "worktree record.path");
+  const barePath = object.barePath === undefined
+    ? deriveLegacyBarePath(path, repo)
+    : requireAbsolutePath(object.barePath, "worktree record.barePath");
   if (paths.has(path)) throw new RegistryError("The worktree registry has duplicate paths.");
   paths.add(path);
   const branch = requireBranch(object.branch, "worktree record.branch");
@@ -225,6 +442,7 @@ function parseWorktreeRecord(value: unknown, ids: Set<string>, paths: Set<string
   return {
     id,
     repo,
+    barePath,
     path,
     branch,
     base,
@@ -235,11 +453,18 @@ function parseWorktreeRecord(value: unknown, ids: Set<string>, paths: Set<string
   };
 }
 
-function parseActiveLease(value: unknown): { pid: number; heartbeatAt: string } {
+function parseActiveLease(value: unknown): NonNullable<WorktreeRecord["activeLease"]> {
   const object = requireObject(value, "worktree record.activeLease");
-  rejectUnknown(object, ["pid", "heartbeatAt"], "worktree record.activeLease");
+  rejectUnknown(object, ["pid", "heartbeatAt", "processIdentity"], "worktree record.activeLease");
   if (typeof object.pid !== "number" || !Number.isSafeInteger(object.pid) || object.pid < 1) throw new RegistryError("worktree record.activeLease.pid is invalid.");
-  return { pid: object.pid, heartbeatAt: requireTimestamp(object.heartbeatAt, "worktree record.activeLease.heartbeatAt") };
+  const processIdentity = object.processIdentity === undefined
+    ? undefined
+    : requireNonEmptyString(object.processIdentity, "worktree record.activeLease.processIdentity");
+  return {
+    pid: object.pid,
+    heartbeatAt: requireTimestamp(object.heartbeatAt, "worktree record.activeLease.heartbeatAt"),
+    ...(processIdentity === undefined ? {} : { processIdentity }),
+  };
 }
 
 function parseCleanupOperation(value: unknown, ids: Set<string>, worktreeIds: Set<string>): CleanupOperation {
@@ -253,6 +478,13 @@ function parseCleanupOperation(value: unknown, ids: Set<string>, worktreeIds: Se
   const branch = requireBranch(object.branch, "cleanup operation.branch");
   if (!isCleanupStatus(object.status)) throw new RegistryError("Cleanup operation status is invalid.");
   const commit = object.commit === null ? null : requireSha(object.commit);
+  if (
+    object.status !== "planned"
+    && object.status !== "aborted"
+    && commit === null
+  ) {
+    throw new RegistryError("A verified cleanup operation is missing its parked commit.");
+  }
   return { id, worktreeId, branch, status: object.status, commit, startedAt: requireTimestamp(object.startedAt, "cleanup operation.startedAt"), updatedAt: requireTimestamp(object.updatedAt, "cleanup operation.updatedAt") };
 }
 
@@ -277,6 +509,25 @@ function requireRepo(value: unknown, label: string): string {
   const [, name] = value.split("/");
   if (name === "." || name === "..") throw new RegistryError(`${label} is invalid.`);
   return value;
+}
+
+function deriveLegacyBarePath(path: string, repo: string): string {
+  const [owner, name] = repo.split("/");
+  const repositoryDirectory = dirname(path);
+  const ownerDirectory = dirname(repositoryDirectory);
+  const worktreesDirectory = dirname(ownerDirectory);
+  if (
+    !owner
+    || !name
+    || basename(repositoryDirectory) !== name
+    || basename(ownerDirectory) !== owner
+    || basename(worktreesDirectory) !== "worktrees"
+  ) {
+    throw new RegistryError(
+      "A legacy worktree record has no barePath and does not use the supported workspace layout. Re-run /flash setup after backing up the registry.",
+    );
+  }
+  return join(dirname(worktreesDirectory), ".flash", "repos", owner, `${name}.git`);
 }
 
 function requireAbsolutePath(value: unknown, label: string): string {
@@ -312,11 +563,24 @@ function requireNonEmptyString(value: unknown, label: string): string {
 }
 
 function isCleanupStatus(value: unknown): value is CleanupOperationStatus {
-  return value === "planned" || value === "committed" || value === "pushed" || value === "remote-verified" || value === "removed" || value === "recorded";
+  return value === "planned" || value === "committed" || value === "pushed" || value === "remote-verified" || value === "removed" || value === "recorded" || value === "aborted";
 }
 
 function cleanupStatusIndex(status: CleanupOperationStatus): number {
   return ["planned", "committed", "pushed", "remote-verified", "removed", "recorded"].indexOf(status);
+}
+
+function assertCleanupTransition(current: CleanupOperationStatus, next: CleanupOperationStatus): void {
+  if (current === next) return;
+  if (current === "aborted" || current === "recorded") {
+    throw new RegistryError("Terminal cleanup operations cannot be advanced.");
+  }
+  if (next === "aborted") {
+    return;
+  }
+  if (cleanupStatusIndex(next) !== cleanupStatusIndex(current) + 1) {
+    throw new RegistryError("Cleanup operations must advance one verified stage at a time.");
+  }
 }
 
 function isNotFound(error: unknown): error is NodeJS.ErrnoException {

@@ -3,7 +3,8 @@
 Launch a fresh, isolated [Pi](https://pi.dev) session in a Git worktree selected
 from your GitHub repositories.
 
-Install the public extension with:
+The package is prepared for a later public release. Once published, install it
+with:
 
 ```bash
 pi install npm:@joshbochu/pi-flash
@@ -51,9 +52,13 @@ launch creates a separate branch and worktree at
 
 Cleanup is intentionally conservative. It starts report-only, considers only
 worktrees already registered by Pi Flash, skips active or recent worktrees, and
-blocks every untracked file (including ignored files) by default. When enabled,
-cleanup pushes and verifies the parking branch before removing a local
-worktree. It never stages ignored files.
+blocks both untracked and ignored files by default. The two policies are
+independent: unignored files may be included in the parking commit, while
+ignored files are never staged and are discarded only when the user explicitly
+chooses that policy. When enabled, cleanup runs in a detached worker, pushes and
+verifies the exact parking commit, and only then removes the local worktree.
+Interrupted operations resume from their last durable stage the next time
+cleanup runs.
 
 ## Development
 

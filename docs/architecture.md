@@ -24,22 +24,29 @@ small local scoring and JSON work done by the extension.
 <pi-agent-dir>/pi-flash/index.json
 <pi-agent-dir>/pi-flash/registry.json
 <pi-agent-dir>/pi-flash/history.jsonl
+<pi-agent-dir>/pi-flash/background/requests/*.json
+<pi-agent-dir>/pi-flash/background/events.jsonl
 
 <workspace-root>/.flash/repos/<owner>/<repository>.git
+<workspace-root>/.flash/locks/<repository-hash>.lock
 <workspace-root>/worktrees/<owner>/<repository>/<petname>
 ```
 
 `<pi-agent-dir>` follows `PI_CODING_AGENT_DIR` and defaults to
-`~/.pi/agent`. All persistent files are versioned, written atomically with
-owner-only permissions. The registry is the authority for managed worktrees;
-history is append-only audit and recovery data.
+`~/.pi/agent`. Snapshot files are versioned and written atomically; append-only
+logs use synced records. All state has owner-only permissions. The registry is
+the authority for managed worktrees; history is append-only audit and recovery
+data. Registry mutations and
+repository preparation use interprocess locks so concurrent Pi sessions cannot
+lose state or race the first clone.
 
 ## Launch lifecycle
 
 1. Load configuration and ensure Pi Flash has completed setup.
-2. Read the local repository index. A stale populated index starts a background
+2. Read the local repository index. Disabled owners are removed from cached
+   results immediately. A stale populated index schedules a detached background
    refresh; it never delays repository matching. A no-match view offers explicit
-   refresh rather than starting an unexpected network operation.
+   refresh rather than starting an unexpected foreground network operation.
 3. Select a repository from an exact match, confident fuzzy match, or picker.
 4. Pi Flash supports GitHub.com in the initial release and ensures the
    owner/repository-namespaced bare clone exists and matches its
@@ -58,27 +65,39 @@ be recovered deliberately.
 
 Cleanup is planned before it is executed. Its default mode is report-only.
 
-1. Scan registry entries when Pi Flash is used.
-2. Skip active, unsafe, or recently used worktrees.
-3. For an eligible worktree, inspect Git status and untracked files.
-4. Default policy blocks every untracked file, including ignored files. Ignored
+1. Reconcile any incomplete durable operation, then scan registry entries when
+   Pi Flash is used.
+2. Recover only leases whose process is conclusively dead or whose PID identity
+   has been recycled.
+3. Skip active, unsafe, or recently used worktrees.
+4. Atomically claim an eligible record (`active` to `parked`) and repeat every
+   age, lease, path, and Git safety check on the fresh record.
+5. Default policy independently blocks untracked and ignored files. Ignored
    files are never staged automatically.
-5. Park eligible changes with a commit and a non-destructive push.
-6. Verify the remote contains the parked commit.
-7. Remove the local worktree only after verification succeeds.
-8. Append the outcome to history and update the registry.
+6. Park eligible changes with a commit and push that exact commit.
+7. Verify the remote branch contains the exact parked commit.
+8. Hold the registry claim lock across the final check and Git worktree removal,
+   preventing a new Pi session from racing deletion.
+9. Append the outcome to history and advance the registry to `recorded`.
 
 Parking operations persist an operation ID and advance through `planned`,
 `committed`, `pushed`, `remote-verified`, `removed`, and `recorded` states.
+A session that opens the worktree before removal changes it back to `active`
+and makes the operation terminal as `aborted`.
 
 ## Security invariants
 
 - Every external process uses an argument array, never shell interpolation.
 - Owner, repository, petname, branch namespace, and workspace paths are
   validated before use.
-- Destructive targets must resolve beneath the configured workspace root.
+- Destructive targets must match the persisted
+  `.flash/repos/<owner>/<repo>.git` and
+  `worktrees/<owner>/<repo>/<petname>` layout, resolve beneath the same recorded
+  root, and remain there after symlinks are resolved.
 - Existing bare clones are checked against the canonical remote before reuse.
 - Failure records contain metadata, never command output that might contain
   credentials.
 - Mutating operations require an explicit user command or an explicitly enabled
   cleanup setting.
+- External commands have bounded output and hard deadlines which terminate
+  their Unix process groups.

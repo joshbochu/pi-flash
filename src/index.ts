@@ -1,9 +1,10 @@
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 
+import { scheduleAutomaticCleanup as scheduleAutomaticCleanupWorker } from "./background.js";
 import { readConfig, writeConfig, type Config } from "./config.js";
 import { cleanEligibleWorktree, scanCleanup } from "./cleanup.js";
 import { HandoffController } from "./handoff.js";
-import { readHistory } from "./history.js";
+import { appendHistory, readHistory, type HistoryEntry } from "./history.js";
 import { launchRepository } from "./launch.js";
 import { decideRepositoryMatch } from "./matcher.js";
 import { pickRepository } from "./picker.js";
@@ -20,10 +21,27 @@ const help = [
 
 export default function piFlash(pi: ExtensionAPI): void {
   const handoff = new HandoffController();
+  let leaseHeartbeat: NodeJS.Timeout | undefined;
+  const stopLeaseHeartbeat = () => {
+    if (leaseHeartbeat) clearInterval(leaseHeartbeat);
+    leaseHeartbeat = undefined;
+  };
   pi.on("session_start", async (_event, ctx) => {
-    await setWorktreeLeaseForPath(ctx.cwd, process.pid).catch(() => undefined);
+    stopLeaseHeartbeat();
+    try {
+      const managed = await setWorktreeLeaseForPath(ctx.cwd, process.pid);
+      if (managed) {
+        leaseHeartbeat = setInterval(() => {
+          void setWorktreeLeaseForPath(ctx.cwd, process.pid).catch(() => undefined);
+        }, 60_000);
+        leaseHeartbeat.unref();
+      }
+    } catch {
+      ctx.ui.notify("Pi Flash could not record this session's cleanup lease. Disable automatic cleanup until the registry issue is resolved.", "warning");
+    }
   });
   pi.on("session_shutdown", async (_event, ctx) => {
+    stopLeaseHeartbeat();
     await clearWorktreeLeaseForPath(ctx.cwd, process.pid).catch(() => undefined);
     handoff.spawnPending();
   });
@@ -57,11 +75,11 @@ export default function piFlash(pi: ExtensionAPI): void {
           }
           return;
         }
-        if (query.startsWith("clean")) {
+        if (isCleanupCommand(query)) {
           await runCleanupCommand(ctx, query, config);
           return;
         }
-        scheduleAutomaticCleanup(config);
+        await scheduleAutomaticCleanup(config);
         if (query === "refresh") {
           await refreshWithProgress(ctx, config);
           return;
@@ -72,11 +90,7 @@ export default function piFlash(pi: ExtensionAPI): void {
             ctx.ui.notify("Pi Flash history is empty.", "info");
             return;
           }
-          const recent = history.slice(-12).reverse().map((entry) => {
-            const repo = typeof entry.metadata.repo === "string" ? ` ${entry.metadata.repo}` : "";
-            const branch = typeof entry.metadata.branch === "string" ? ` (${entry.metadata.branch})` : "";
-            return `${entry.at}  ${entry.event}${repo}${branch}`;
-          });
+          const recent = history.slice(-12).reverse().map(formatHistoryEntry);
           ctx.ui.notify(recent.join("\n"), "info");
           return;
         }
@@ -101,13 +115,21 @@ export default function piFlash(pi: ExtensionAPI): void {
   });
 }
 
-function scheduleAutomaticCleanup(config: Config): void {
+async function scheduleAutomaticCleanup(config: Config): Promise<void> {
   if (!config.cleanup.enabled) return;
-  void scanCleanup(config).then(async (proposals) => {
-    for (const proposal of proposals) {
-      if (proposal.eligible) await cleanEligibleWorktree(proposal.record, config).catch(() => undefined);
-    }
-  }).catch(() => undefined);
+  try {
+    await scheduleAutomaticCleanupWorker();
+  } catch (error: unknown) {
+    await appendHistory({
+      version: 1,
+      at: new Date().toISOString(),
+      event: "failure",
+      metadata: {
+        stage: "background-schedule",
+        code: error instanceof Error ? error.name : "unknown",
+      },
+    }).catch(() => undefined);
+  }
 }
 
 async function runCleanupCommand(ctx: ExtensionCommandContext, query: string, config: Config): Promise<void> {
@@ -130,6 +152,18 @@ async function runCleanupCommand(ctx: ExtensionCommandContext, query: string, co
   }
   if (query !== "clean") { ctx.ui.notify("Use /flash clean, /flash clean enable, /flash clean disable, or /flash clean config.", "warning"); return; }
   const proposals = await scanCleanup(config);
+  await Promise.all(proposals.map((proposal) => appendHistory({
+    version: 1,
+    at: new Date().toISOString(),
+    event: "cleanup-proposed",
+    metadata: {
+      id: proposal.record.id,
+      repo: proposal.record.repo,
+      branch: proposal.record.branch,
+      eligible: proposal.eligible,
+      reason: proposal.reasons.join(","),
+    },
+  })));
   const eligible = proposals.filter((proposal) => proposal.eligible);
   const report = proposals.length === 0 ? "No Pi Flash worktrees are registered." : proposals.map((proposal) => `${proposal.eligible ? "ready" : "skip"}  ${proposal.record.repo} (${proposal.record.branch})${proposal.reasons.length ? `: ${proposal.reasons.join(", ")}` : ""}`).join("\n");
   ctx.ui.notify(report, "info");
@@ -145,4 +179,19 @@ async function runCleanupCommand(ctx: ExtensionCommandContext, query: string, co
 function reportError(ctx: ExtensionCommandContext, error: unknown): void {
   const message = error instanceof Error ? error.message : String(error);
   ctx.ui.notify(`Pi Flash: ${message}`, "error");
+}
+
+export function isCleanupCommand(query: string): boolean {
+  return query === "clean" || query.startsWith("clean ");
+}
+
+export function formatHistoryEntry(entry: HistoryEntry): string {
+  const repo = typeof entry.metadata.repo === "string" ? ` ${entry.metadata.repo}` : "";
+  const branch = typeof entry.metadata.branch === "string" ? ` (${entry.metadata.branch})` : "";
+  const commit = typeof entry.metadata.commit === "string"
+    ? ` @ ${entry.metadata.commit.slice(0, 12)}`
+    : typeof entry.metadata.baseSha === "string"
+      ? ` @ ${entry.metadata.baseSha.slice(0, 12)}`
+      : "";
+  return `${entry.at}  ${entry.event}${repo}${branch}${commit}`;
 }

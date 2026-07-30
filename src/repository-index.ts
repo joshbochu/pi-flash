@@ -1,5 +1,6 @@
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 
+import { scheduleRepositoryRefresh } from "./background.js";
 import type { Config } from "./config.js";
 import {
   enabledSourceOwners,
@@ -21,17 +22,32 @@ export async function ensureRepositoryIndex(config: Config): Promise<RepositoryI
   const existing = await readRepositoryIndex();
   if (!existing) return refreshConfiguredSources(config);
   if (isIndexStale(existing, config.index.maxAgeHours)) {
-    void refreshConfiguredSources(config).catch(() => undefined);
+    // Persist and spawn before returning the stale cache. The detached worker
+    // survives a confident `/flash` launch replacing this Pi process.
+    await scheduleRepositoryRefresh().catch(() => undefined);
   }
-  return existing;
+  return filterRepositoryIndexBySources(existing, config.sources);
+}
+
+/**
+ * Treat the configured source list as the authorization boundary even when a
+ * stale cache is all that is available. Disabling an owner takes effect
+ * immediately and never depends on a successful network refresh.
+ */
+export function filterRepositoryIndexBySources(
+  index: RepositoryIndex,
+  sources: Readonly<Record<string, boolean>>,
+): RepositoryIndex {
+  const enabledOwners = new Set(enabledSourceOwners(sources));
+  return {
+    ...index,
+    repos: index.repos.filter((repository) => enabledOwners.has(repository.owner)),
+  };
 }
 
 /** Refreshes on user request, returning failure to the caller for clear UI. */
 export async function refreshConfiguredSources(config: Config): Promise<RepositoryIndex> {
   const owners = enabledSourceOwners(config.sources);
-  if (owners.length === 0) {
-    throw new Error("No GitHub accounts are enabled. Run /flash config to enable at least one repository source.");
-  }
   const key = getIndexPath();
   const current = activeRefreshes.get(key);
   if (current) return current;

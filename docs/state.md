@@ -66,12 +66,17 @@ or the Pi agent directory.
     {
       "id": "uuid",
       "repo": "owner/repository",
+      "barePath": "/workspace/.flash/repos/owner/repository.git",
       "path": "/absolute/path",
       "branch": "namespace/petname",
       "base": { "sha": "...", "stale": false, "fetchedAt": "..." },
       "createdAt": "...",
       "lastUsedAt": "...",
-      "activeLease": { "pid": 12345, "heartbeatAt": "..." },
+      "activeLease": {
+        "pid": 12345,
+        "heartbeatAt": "...",
+        "processIdentity": "OS process start identity"
+      },
       "status": "active"
     }
   ],
@@ -79,13 +84,25 @@ or the Pi agent directory.
 }
 ```
 
-An active lease records the Pi process that has opened a managed worktree and
-its latest heartbeat. A non-null lease blocks cleanup. The workspace root is
-stored as a canonical absolute path even when setup input used `~`.
+An active lease records the Pi process that has opened a managed worktree, its
+latest heartbeat, and (when the OS provides it) an identity which distinguishes
+a recycled PID. A non-null live or uncertain lease blocks cleanup. The
+workspace root is stored as a canonical absolute path even when setup input
+used `~`; each worktree also records its bare repository so an old root remains
+recoverable after configuration changes.
 
 Cleanup records a durable operation state (`planned`, `committed`, `pushed`,
-`remote-verified`, `removed`, or `recorded`) so interrupted remote pushes and
-local removals can be reconciled without guessing.
+`remote-verified`, `removed`, `recorded`, or terminal `aborted`) so interrupted
+remote pushes and local removals can be reconciled without guessing. Every
+registry mutation is a locked read-modify-write transaction.
+
+## Background queue
+
+Refresh and automatic-cleanup requests are small versioned JSON files below
+`background/requests`. A detached macOS/Linux worker owns a tokenized,
+heartbeating lock, coalesces duplicate job kinds, and records credential-free
+outcomes in `background/events.jsonl`. A request is removed only after its
+outcome is durable.
 
 ## History
 

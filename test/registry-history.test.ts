@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { appendHistory, getHistoryPath, readHistory, recordCreatedWorktree } from "../src/history.js";
-import { getRegistryPath, parseRegistry, readRegistry, registerWorktree, updateWorktreeRecord } from "../src/registry.js";
+import { claimWorktreeForCleanup, getRegistryPath, parseRegistry, readRegistry, registerWorktree } from "../src/registry.js";
 
 const directories: string[] = [];
 
@@ -23,13 +23,13 @@ describe("worktree registry and history", () => {
     expect(await readFile(getHistoryPath(sandbox.options), "utf8")).not.toContain("https://");
   });
 
-  it("records stale fallback separately and supports guarded record updates", async () => {
+  it("records stale fallback separately and supports an atomic cleanup claim", async () => {
     const sandbox = await createSandbox();
     const staleWorkspace = { ...workspace, stale: true, attempts: 3, lastFetchedAt: "2026-07-29T12:00:00.000Z" };
     const record = await registerWorktree(repository, staleWorkspace, { ...sandbox.options, id: () => id });
     await recordCreatedWorktree(record, repository, staleWorkspace, sandbox.options);
-    const updated = await updateWorktreeRecord(id, (current) => ({ ...current, status: "parked" }), sandbox.options);
-    expect(updated.status).toBe("parked");
+    const claim = await claimWorktreeForCleanup(id, sandbox.options);
+    expect(claim).toMatchObject({ claimed: true, record: { status: "parked" }, operation: { status: "planned" } });
     expect((await readHistory(sandbox.options)).map((entry) => entry.event)).toEqual(["worktree-created", "stale-fallback"]);
   });
 

@@ -81,6 +81,31 @@ describe("repository index", () => {
     expect((await stat(getIndexPath(sandbox.options))).mode & 0o777).toBe(0o600);
   });
 
+  it("skips empty repositories without failing the rest of an owner refresh", async () => {
+    const sandbox = await createSandbox();
+    const refreshed = await refreshRepositoryIndex(["octo"], {
+      ...sandbox.options,
+      listRepositories: async () => [
+        { ...repository("octo", "empty"), defaultBranchRef: null },
+        repository("octo", "ready"),
+      ],
+    });
+
+    expect(refreshed.repos.map((entry) => entry.nameWithOwner)).toEqual(["octo/ready"]);
+    await expect(readRepositoryIndex(sandbox.options)).resolves.toEqual(refreshed);
+  });
+
+  it("still rejects malformed repository entries whose default branch field is omitted", async () => {
+    const sandbox = await createSandbox();
+    const malformed = repository("octo", "malformed");
+    delete malformed.defaultBranchRef;
+
+    await expect(refreshRepositoryIndex(["octo"], {
+      ...sandbox.options,
+      listRepositories: async () => [malformed],
+    })).rejects.toThrow("has no default branch");
+  });
+
   it("identifies stale caches and enabled sources predictably", () => {
     const index = { version: 1 as const, refreshedAt: "2026-07-29T12:00:00.000Z", repos: [] };
     expect(isIndexStale(index, 24, Date.parse("2026-07-30T12:00:00.000Z"))).toBe(true);
