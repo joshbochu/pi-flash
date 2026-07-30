@@ -21,9 +21,9 @@ small local scoring and JSON work done by the extension.
 
 ```text
 <pi-agent-dir>/pi-flash/config.json
+<pi-agent-dir>/pi-flash/index.json
 <pi-agent-dir>/pi-flash/registry.json
 <pi-agent-dir>/pi-flash/history.jsonl
-<pi-agent-dir>/cache/pi-flash/repos.json
 
 <workspace-root>/.flash/repos/<owner>/<repository>.git
 <workspace-root>/worktrees/<owner>/<repository>/<petname>
