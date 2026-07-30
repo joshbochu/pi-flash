@@ -9,7 +9,7 @@ an actionable migration error; absent values are filled from documented defaults
 {
   "version": 1,
   "host": "github.com",
-  "workspaceRoot": "~/dev",
+  "workspaceRoot": "/absolute/path/to/dev",
   "sources": {
     "joshbochu": true,
     "example-org": false
@@ -71,15 +71,17 @@ or the Pi agent directory.
       "base": { "sha": "...", "stale": false, "fetchedAt": "..." },
       "createdAt": "...",
       "lastUsedAt": "...",
-      "activeLease": null,
+      "activeLease": { "pid": 12345, "heartbeatAt": "..." },
       "status": "active"
     }
-  ]
+  ],
+  "operations": []
 }
 ```
 
-An active lease stores a process ID, process-start marker, and heartbeat. It is
-treated as inactive only after the process identity can no longer be verified.
+An active lease records the Pi process that has opened a managed worktree and
+its latest heartbeat. A non-null lease blocks cleanup. The workspace root is
+stored as a canonical absolute path even when setup input used `~`.
 
 Cleanup records a durable operation state (`planned`, `committed`, `pushed`,
 `remote-verified`, `removed`, or `recorded`) so interrupted remote pushes and
@@ -88,6 +90,6 @@ local removals can be reconciled without guessing.
 ## History
 
 History is JSONL. Each line has `version`, `at`, `event`, and a serializable
-metadata object. It records launch, stale fallback, cleanup proposal, park,
-removal, skip, and failure events. It is an audit trail, not the source of
-truth for active worktrees.
+metadata object. It records worktree creation, handoff scheduling, stale
+fallback, cleanup parking/removal, skips, and failures. It is an audit trail,
+not the source of truth for active worktrees.
