@@ -1,12 +1,13 @@
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 
 import { readConfig } from "./config.js";
+import { ensureRepositoryIndex, refreshWithProgress } from "./repository-index.js";
 import { runDoctor, runSetup } from "./setup.js";
 
 const help = [
   "Pi Flash launches a fresh Pi session in an isolated Git worktree.",
   "Usage: /flash [repository query]",
-  "Commands: /flash setup, /flash config, /flash doctor, /flash help",
+  "Commands: /flash setup, /flash config, /flash refresh, /flash doctor, /flash help",
   "Repository launching and index refresh will be available after setup.",
 ].join("\n");
 
@@ -24,7 +25,8 @@ export default function piFlash(pi: ExtensionAPI): void {
       }
       try {
         if (query === "setup" || query === "config") {
-          await runSetup(ctx);
+          const setup = await runSetup(ctx);
+          if (setup) await refreshWithProgress(ctx, setup.config);
           return;
         }
         if (query === "doctor") {
@@ -35,11 +37,22 @@ export default function piFlash(pi: ExtensionAPI): void {
         if (!config) {
           const setup = await runSetup(ctx);
           if (setup) {
+            await refreshWithProgress(ctx, setup.config);
             ctx.ui.notify("Setup is complete. Run /flash again to choose a repository.", "info");
           }
           return;
         }
-        ctx.ui.notify(`Repository matching for ${query} arrives in the next Pi Flash milestone.`, "info");
+        if (query === "refresh") {
+          await refreshWithProgress(ctx, config);
+          return;
+        }
+        const index = await ensureRepositoryIndex(config);
+        ctx.ui.notify(
+          query === ""
+            ? `${index.repos.length} repositories are ready. The interactive picker arrives in the next Pi Flash milestone.`
+            : `Repository matching for ${query} arrives in the next Pi Flash milestone.`,
+          "info",
+        );
       } catch (error) {
         reportError(ctx, error);
       }
