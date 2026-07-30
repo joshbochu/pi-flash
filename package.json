@@ -1,0 +1,59 @@
+{
+  "name": "@joshbochu/pi-flash",
+  "version": "0.1.0",
+  "description": "Launch fresh, isolated Pi sessions in Git worktrees.",
+  "type": "module",
+  "license": "MIT",
+  "author": "joshbochu",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/joshbochu/pi-flash.git"
+  },
+  "homepage": "https://github.com/joshbochu/pi-flash#readme",
+  "bugs": {
+    "url": "https://github.com/joshbochu/pi-flash/issues"
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "git",
+    "worktree",
+    "agent"
+  ],
+  "files": [
+    "src",
+    "docs",
+    "README.md",
+    "ROADMAP.md",
+    "LICENSE"
+  ],
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
+  "scripts": {
+    "check": "tsc --noEmit",
+    "test": "vitest run && npm run test:handoff",
+    "test:handoff": "node --test test/handoff.test.mjs",
+    "pack:check": "npm pack --dry-run"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "0.80.6",
+    "@earendil-works/pi-tui": "0.80.6",
+    "@types/node": "22.19.0",
+    "typescript": "5.9.3",
+    "vitest": "4.1.9"
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  }
+}
