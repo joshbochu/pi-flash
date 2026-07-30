@@ -14,7 +14,7 @@ describe("worktree registry and history", () => {
     const record = await registerWorktree(repository, workspace, { ...sandbox.options, now: () => new Date("2026-07-30T12:00:00.000Z"), id: () => id });
     await recordCreatedWorktree(record, repository, workspace, { ...sandbox.options, now: () => new Date("2026-07-30T12:00:01.000Z") });
 
-    expect(await readRegistry(sandbox.options)).toEqual({ version: 1, worktrees: [record] });
+    expect(await readRegistry(sandbox.options)).toEqual({ version: 1, worktrees: [record], operations: [] });
     expect(await readHistory(sandbox.options)).toEqual([
       expect.objectContaining({ event: "worktree-created", metadata: expect.objectContaining({ id, repo: "acme/billing", stale: false }) }),
     ]);

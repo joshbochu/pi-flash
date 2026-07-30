@@ -9,6 +9,7 @@ import type { RepositoryIndexEntry } from "./index-store.js";
 export const REGISTRY_VERSION = 1;
 
 export type WorktreeStatus = "active" | "parked" | "removed";
+export type CleanupOperationStatus = "planned" | "committed" | "pushed" | "remote-verified" | "removed" | "recorded";
 
 export interface WorktreeRecord {
   id: string;
@@ -18,13 +19,24 @@ export interface WorktreeRecord {
   base: { sha: string; stale: boolean; fetchedAt: string };
   createdAt: string;
   lastUsedAt: string;
-  activeLease: null;
+  activeLease: { pid: number; heartbeatAt: string } | null;
   status: WorktreeStatus;
 }
 
 export interface WorktreeRegistry {
   version: typeof REGISTRY_VERSION;
   worktrees: WorktreeRecord[];
+  operations: CleanupOperation[];
+}
+
+export interface CleanupOperation {
+  id: string;
+  worktreeId: string;
+  branch: string;
+  status: CleanupOperationStatus;
+  commit: string | null;
+  startedAt: string;
+  updatedAt: string;
 }
 
 export class RegistryError extends Error {
@@ -43,7 +55,7 @@ export async function readRegistry(options: ConfigLocationOptions = {}): Promise
   try {
     content = await readFile(getRegistryPath(options), "utf8");
   } catch (error: unknown) {
-    if (isNotFound(error)) return { version: REGISTRY_VERSION, worktrees: [] };
+    if (isNotFound(error)) return { version: REGISTRY_VERSION, worktrees: [], operations: [] };
     throw new RegistryError("Could not read the Pi Flash worktree registry.", { cause: asError(error) });
   }
   try {
@@ -56,12 +68,17 @@ export async function readRegistry(options: ConfigLocationOptions = {}): Promise
 
 export function parseRegistry(value: unknown): WorktreeRegistry {
   const object = requireObject(value, "worktree registry");
-  rejectUnknown(object, ["version", "worktrees"], "worktree registry");
+  rejectUnknown(object, ["version", "worktrees", "operations"], "worktree registry");
   if (object.version !== REGISTRY_VERSION) throw new RegistryError("The worktree registry was created by an incompatible Pi Flash version.");
   if (!Array.isArray(object.worktrees)) throw new RegistryError("The worktree registry has an invalid worktrees list.");
   const ids = new Set<string>();
   const paths = new Set<string>();
-  return { version: REGISTRY_VERSION, worktrees: object.worktrees.map((record) => parseWorktreeRecord(record, ids, paths)) };
+  const worktrees = object.worktrees.map((record) => parseWorktreeRecord(record, ids, paths));
+  if (object.operations !== undefined && !Array.isArray(object.operations)) throw new RegistryError("The worktree registry has an invalid operations list.");
+  const operationIds = new Set<string>();
+  const worktreeIds = new Set(worktrees.map((record) => record.id));
+  const operations = (object.operations ?? []).map((operation) => parseCleanupOperation(operation, operationIds, worktreeIds));
+  return { version: REGISTRY_VERSION, worktrees, operations };
 }
 
 export async function writeRegistry(registry: WorktreeRegistry, options: ConfigLocationOptions = {}): Promise<void> {
@@ -120,6 +137,52 @@ export async function updateWorktreeRecord(
   return registry.worktrees[index]!;
 }
 
+export async function setWorktreeLeaseForPath(path: string, pid: number, options: ConfigLocationOptions & { now?: () => Date } = {}): Promise<void> {
+  const registry = await readRegistry(options);
+  const record = registry.worktrees.find((candidate) => candidate.path === path && candidate.status === "active");
+  if (!record) return;
+  record.activeLease = { pid, heartbeatAt: (options.now?.() ?? new Date()).toISOString() };
+  record.lastUsedAt = record.activeLease.heartbeatAt;
+  await writeRegistry(registry, options);
+}
+
+export async function clearWorktreeLeaseForPath(path: string, pid: number, options: ConfigLocationOptions = {}): Promise<void> {
+  const registry = await readRegistry(options);
+  const record = registry.worktrees.find((candidate) => candidate.path === path && candidate.activeLease?.pid === pid);
+  if (!record) return;
+  record.activeLease = null;
+  await writeRegistry(registry, options);
+}
+
+export async function createCleanupOperation(
+  record: WorktreeRecord,
+  options: ConfigLocationOptions & { now?: () => Date; id?: () => string } = {},
+): Promise<CleanupOperation> {
+  const registry = await readRegistry(options);
+  const now = (options.now?.() ?? new Date()).toISOString();
+  const operation: CleanupOperation = { id: options.id?.() ?? randomUUID(), worktreeId: record.id, branch: record.branch, status: "planned", commit: null, startedAt: now, updatedAt: now };
+  registry.operations.push(operation);
+  await writeRegistry(registry, options);
+  return operation;
+}
+
+export async function advanceCleanupOperation(
+  id: string,
+  status: CleanupOperationStatus,
+  commit: string | null,
+  options: ConfigLocationOptions & { now?: () => Date } = {},
+): Promise<CleanupOperation> {
+  const registry = await readRegistry(options);
+  const index = registry.operations.findIndex((operation) => operation.id === id);
+  if (index < 0) throw new RegistryError(`Pi Flash does not track cleanup operation ${id}.`);
+  const current = registry.operations[index]!;
+  if (cleanupStatusIndex(status) < cleanupStatusIndex(current.status)) throw new RegistryError("Cleanup operations cannot move backward.");
+  const updated = { ...current, status, commit, updatedAt: (options.now?.() ?? new Date()).toISOString() };
+  registry.operations[index] = updated;
+  await writeRegistry(registry, options);
+  return updated;
+}
+
 async function atomicWrite(destination: string, content: string): Promise<void> {
   const temporary = join(dirname(destination), `.registry.${process.pid}.${randomUUID()}.tmp`);
   let handle: Awaited<ReturnType<typeof open>> | undefined;
@@ -157,7 +220,7 @@ function parseWorktreeRecord(value: unknown, ids: Set<string>, paths: Set<string
     stale: requireBoolean(baseObject.stale, "worktree record.base.stale"),
     fetchedAt: requireNonEmptyString(baseObject.fetchedAt, "worktree record.base.fetchedAt"),
   };
-  if (object.activeLease !== null) throw new RegistryError("This Pi Flash release only supports null active leases.");
+  const activeLease = object.activeLease === null ? null : parseActiveLease(object.activeLease);
   if (object.status !== "active" && object.status !== "parked" && object.status !== "removed") throw new RegistryError("The worktree registry has an invalid status.");
   return {
     id,
@@ -167,9 +230,30 @@ function parseWorktreeRecord(value: unknown, ids: Set<string>, paths: Set<string
     base,
     createdAt: requireTimestamp(object.createdAt, "worktree record.createdAt"),
     lastUsedAt: requireTimestamp(object.lastUsedAt, "worktree record.lastUsedAt"),
-    activeLease: null,
+    activeLease,
     status: object.status,
   };
+}
+
+function parseActiveLease(value: unknown): { pid: number; heartbeatAt: string } {
+  const object = requireObject(value, "worktree record.activeLease");
+  rejectUnknown(object, ["pid", "heartbeatAt"], "worktree record.activeLease");
+  if (typeof object.pid !== "number" || !Number.isSafeInteger(object.pid) || object.pid < 1) throw new RegistryError("worktree record.activeLease.pid is invalid.");
+  return { pid: object.pid, heartbeatAt: requireTimestamp(object.heartbeatAt, "worktree record.activeLease.heartbeatAt") };
+}
+
+function parseCleanupOperation(value: unknown, ids: Set<string>, worktreeIds: Set<string>): CleanupOperation {
+  const object = requireObject(value, "cleanup operation");
+  rejectUnknown(object, ["id", "worktreeId", "branch", "status", "commit", "startedAt", "updatedAt"], "cleanup operation");
+  const id = requireUuid(object.id, "cleanup operation.id");
+  if (ids.has(id)) throw new RegistryError("The worktree registry has duplicate cleanup operation ids.");
+  ids.add(id);
+  const worktreeId = requireUuid(object.worktreeId, "cleanup operation.worktreeId");
+  if (!worktreeIds.has(worktreeId)) throw new RegistryError("A cleanup operation references an unknown worktree.");
+  const branch = requireBranch(object.branch, "cleanup operation.branch");
+  if (!isCleanupStatus(object.status)) throw new RegistryError("Cleanup operation status is invalid.");
+  const commit = object.commit === null ? null : requireSha(object.commit);
+  return { id, worktreeId, branch, status: object.status, commit, startedAt: requireTimestamp(object.startedAt, "cleanup operation.startedAt"), updatedAt: requireTimestamp(object.updatedAt, "cleanup operation.updatedAt") };
 }
 
 function requireObject(value: unknown, label: string): Record<string, unknown> {
@@ -223,6 +307,14 @@ function requireTimestamp(value: unknown, label: string): string {
 function requireNonEmptyString(value: unknown, label: string): string {
   if (typeof value !== "string" || value.trim() === "") throw new RegistryError(`${label} must be a non-empty string.`);
   return value;
+}
+
+function isCleanupStatus(value: unknown): value is CleanupOperationStatus {
+  return value === "planned" || value === "committed" || value === "pushed" || value === "remote-verified" || value === "removed" || value === "recorded";
+}
+
+function cleanupStatusIndex(status: CleanupOperationStatus): number {
+  return ["planned", "committed", "pushed", "remote-verified", "removed", "recorded"].indexOf(status);
 }
 
 function isNotFound(error: unknown): error is NodeJS.ErrnoException {
