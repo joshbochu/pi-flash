@@ -14,6 +14,12 @@ After installation, `/flash` opens a repository picker and `/flash <query>`
 launches a confident match in a new worktree. Setup configures repository
 sources, the workspace root, matching, and conservative cleanup behavior.
 
+On first use, `/flash` opens a welcome overlay. It verifies `git`, `gh`, and
+Pi, discovers your GitHub account and organizations through `gh`, lets you
+enable the accounts to index, and records your chosen workspace root. Pi Flash
+stores only its own configuration below `PI_CODING_AGENT_DIR` (or
+`~/.pi/agent` when that variable is unset).
+
 ## Development
 
 ```bash
