@@ -20,6 +20,12 @@ enable the accounts to index, and records your chosen workspace root. Pi Flash
 stores only its own configuration below `PI_CODING_AGENT_DIR` (or
 `~/.pi/agent` when that variable is unset).
 
+Use `/flash billing` to search repository names. Include a slash, as in
+`/flash acme/billing`, to match an exact owner/repository name. A high-scoring,
+clear result launches directly; otherwise the searchable picker shows the best
+local matches and their descriptions. `/flash refresh` explicitly replaces the
+cached index; an index older than 24 hours refreshes in the background.
+
 ## Development
 
 ```bash

@@ -1,6 +1,8 @@
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 
 import { readConfig } from "./config.js";
+import { decideRepositoryMatch } from "./matcher.js";
+import { pickRepository } from "./picker.js";
 import { ensureRepositoryIndex, refreshWithProgress } from "./repository-index.js";
 import { runDoctor, runSetup } from "./setup.js";
 
@@ -8,7 +10,7 @@ const help = [
   "Pi Flash launches a fresh Pi session in an isolated Git worktree.",
   "Usage: /flash [repository query]",
   "Commands: /flash setup, /flash config, /flash refresh, /flash doctor, /flash help",
-  "Repository launching and index refresh will be available after setup.",
+  "A confident query launches immediately; other queries open the picker.",
 ].join("\n");
 
 export default function piFlash(pi: ExtensionAPI): void {
@@ -47,12 +49,19 @@ export default function piFlash(pi: ExtensionAPI): void {
           return;
         }
         const index = await ensureRepositoryIndex(config);
-        ctx.ui.notify(
-          query === ""
-            ? `${index.repos.length} repositories are ready. The interactive picker arrives in the next Pi Flash milestone.`
-            : `Repository matching for ${query} arrives in the next Pi Flash milestone.`,
-          "info",
-        );
+        const decision = decideRepositoryMatch(query, index.repos, config.matching);
+        if (decision.kind === "none") {
+          ctx.ui.notify(`No indexed repository matches ${JSON.stringify(query)}. Run /flash refresh to update the cache.`, "warning");
+          return;
+        }
+        if (decision.kind === "auto") {
+          ctx.ui.notify(`Resolved ${decision.match.repository.nameWithOwner}. Worktree launch arrives in the next Pi Flash milestone.`, "info");
+          return;
+        }
+        const repository = await pickRepository(ctx, decision.ranked.map((match) => match.repository), query);
+        if (repository) {
+          ctx.ui.notify(`Selected ${repository.nameWithOwner}. Worktree launch arrives in the next Pi Flash milestone.`, "info");
+        }
       } catch (error) {
         reportError(ctx, error);
       }
