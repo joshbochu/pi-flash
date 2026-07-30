@@ -37,12 +37,30 @@ jobs:
       - run: npm run check
       - run: npm test
       - run: npm run pack:check
+      - name: Check whether the package exists on npm
+        id: package
+        run: |
+          if npm view @joshbochu/pi-flash version >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          elif npm ping >/dev/null 2>&1; then
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "::error::Could not reach the npm registry."
+            exit 1
+          fi
+      - name: Wait for the first release
+        if: ${{ (github.event_name != 'workflow_dispatch' || !inputs.bootstrap) && steps.package.outputs.exists == 'false' }}
+        run: echo "::notice::Run this workflow manually with bootstrap enabled to publish 0.1.0."
       - name: Bump patch version
-        if: ${{ github.event_name != 'workflow_dispatch' || !inputs.bootstrap }}
+        if: ${{ (github.event_name != 'workflow_dispatch' || !inputs.bootstrap) && steps.package.outputs.exists == 'true' }}
         run: npm version patch --no-git-tag-version
       - name: Bootstrap the package on npm
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.bootstrap }}
         run: |
+          if [ "${{ steps.package.outputs.exists }}" = "true" ]; then
+            echo "::error::The package already exists; run a normal release instead."
+            exit 1
+          fi
           if [ -z "$NODE_AUTH_TOKEN" ]; then
             echo "::error::Add an NPM_TOKEN repository secret before bootstrapping the package."
             exit 1
@@ -51,10 +69,10 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
       - name: Publish with npm trusted publishing
-        if: ${{ github.event_name != 'workflow_dispatch' || !inputs.bootstrap }}
+        if: ${{ (github.event_name != 'workflow_dispatch' || !inputs.bootstrap) && steps.package.outputs.exists == 'true' }}
         run: npm publish --access public
       - name: Commit the published version
-        if: ${{ github.event_name != 'workflow_dispatch' || !inputs.bootstrap }}
+        if: ${{ (github.event_name != 'workflow_dispatch' || !inputs.bootstrap) && steps.package.outputs.exists == 'true' }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
