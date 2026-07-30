@@ -1,7 +1,14 @@
 name: Release
 
 on:
+  push:
+    branches: [main]
   workflow_dispatch:
+    inputs:
+      bootstrap:
+        description: Publish the first version with the NPM_TOKEN secret
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -13,7 +20,7 @@ concurrency:
 
 jobs:
   publish:
-    if: ${{ github.event_name == 'workflow_dispatch' || !contains(github.event.head_commit.message, '[skip pi-flash release]') }}
+    if: ${{ github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' || !contains(github.event.head_commit.message, '[skip pi-flash release]')) }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -21,18 +28,33 @@ jobs:
           fetch-depth: 0
       - uses: actions/setup-node@v6
         with:
-          node-version: "22"
+          node-version: "24"
           registry-url: https://registry.npmjs.org
-          cache: npm
+          package-manager-cache: false
+      - name: Install an npm CLI with trusted publishing support
+        run: npm install --global npm@^11.15.0
       - run: npm ci --legacy-peer-deps
       - run: npm run check
       - run: npm test
       - run: npm run pack:check
       - name: Bump patch version
+        if: ${{ github.event_name != 'workflow_dispatch' || !inputs.bootstrap }}
         run: npm version patch --no-git-tag-version
+      - name: Bootstrap the package on npm
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.bootstrap }}
+        run: |
+          if [ -z "$NODE_AUTH_TOKEN" ]; then
+            echo "::error::Add an NPM_TOKEN repository secret before bootstrapping the package."
+            exit 1
+          fi
+          npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
       - name: Publish with npm trusted publishing
-        run: npm publish --provenance --access public
+        if: ${{ github.event_name != 'workflow_dispatch' || !inputs.bootstrap }}
+        run: npm publish --access public
       - name: Commit the published version
+        if: ${{ github.event_name != 'workflow_dispatch' || !inputs.bootstrap }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
