@@ -235,8 +235,7 @@ function createPetNameDefault(): string {
 
 function commandFailure(message: string, result: { code: number; stderr: string; timedOut: boolean } | undefined): GitWorkspaceError {
   const timeout = result?.timedOut ? " The command timed out." : "";
-  const detail = result?.stderr.trim();
-  return new GitWorkspaceError(`${message}${timeout}${detail ? ` ${detail}` : ""}`);
+  return new GitWorkspaceError(`${message}${timeout}`);
 }
 
 function defaultSleep(milliseconds: number): Promise<void> {

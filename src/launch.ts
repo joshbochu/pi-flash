@@ -27,7 +27,7 @@ export async function launchRepository(
   try {
     // Preflight before creating the worktree so an unavailable launcher cannot
     // strand a newly created directory.
-    const request = controller.preflight("/");
+    const request = controller.preflight(config.workspaceRoot);
     const workspace = await prepareWorkspace(repository, config, login);
     request.targetCwd = workspace.worktreePath;
     const record = await registerWorktree(repository, workspace);

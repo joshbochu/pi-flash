@@ -57,13 +57,13 @@ export default function piFlash(pi: ExtensionAPI): void {
           }
           return;
         }
+        if (query.startsWith("clean")) {
+          await runCleanupCommand(ctx, query, config);
+          return;
+        }
         scheduleAutomaticCleanup(config);
         if (query === "refresh") {
           await refreshWithProgress(ctx, config);
-          return;
-        }
-        if (query.startsWith("clean")) {
-          await runCleanupCommand(ctx, query, config);
           return;
         }
         if (query === "history") {

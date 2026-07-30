@@ -1,7 +1,7 @@
 import { mkdtemp, mkdir, readFile, realpath, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   createDefaultConfig,
@@ -40,6 +40,12 @@ describe("Pi Flash configuration", () => {
     });
     expect(resolveAgentDirectory({ homeDirectory, environment: {} })).toBe("/example/home/.pi/agent");
     expect(resolveAgentDirectory({ homeDirectory, environment: { PI_CODING_AGENT_DIR: "~/custom-pi" } })).toBe("/example/home/custom-pi");
+  });
+
+  it("honors PI_CODING_AGENT_DIR from the real process environment", () => {
+    vi.stubEnv("PI_CODING_AGENT_DIR", "/example/from-environment");
+    expect(resolveAgentDirectory({ homeDirectory: "/example/home" })).toBe("/example/from-environment");
+    vi.unstubAllEnvs();
   });
 
   it("fills absent v1 values while retaining explicitly configured values", () => {

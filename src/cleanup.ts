@@ -100,5 +100,5 @@ async function hasGitOperation(cwd: string): Promise<boolean> {
 }
 
 async function requireCommit(cwd: string, ref: string): Promise<string> { const result = await requireGit(cwd, ["rev-parse", "--verify", `${ref}^{commit}`], "Could not resolve parked commit."); const sha = result.stdout.trim(); if (!/^[0-9a-f]{40,64}$/i.test(sha)) throw new Error("Git returned an invalid parked commit."); return sha; }
-async function requireGit(cwd: string, args: string[], message: string) { const result = await git(cwd, args); if (result.code !== 0) throw new Error(`${message}${result.stderr.trim() ? ` ${result.stderr.trim()}` : ""}`); return result; }
+async function requireGit(cwd: string, args: string[], message: string) { const result = await git(cwd, args); if (result.code !== 0) throw new Error(result.timedOut ? `${message} The command timed out.` : message); return result; }
 async function git(cwd: string, args: string[]) { return runCommand("git", args, { cwd, timeoutMs: 60_000 }); }

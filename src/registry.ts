@@ -274,6 +274,8 @@ function requireUuid(value: unknown, label: string): string {
 
 function requireRepo(value: unknown, label: string): string {
   if (typeof value !== "string" || !/^[A-Za-z0-9-]+\/[A-Za-z0-9._-]+$/.test(value)) throw new RegistryError(`${label} is invalid.`);
+  const [, name] = value.split("/");
+  if (name === "." || name === "..") throw new RegistryError(`${label} is invalid.`);
   return value;
 }
 
