@@ -1,6 +1,8 @@
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 
 import { readConfig } from "./config.js";
+import { HandoffController } from "./handoff.js";
+import { launchRepository } from "./launch.js";
 import { decideRepositoryMatch } from "./matcher.js";
 import { pickRepository } from "./picker.js";
 import { ensureRepositoryIndex, refreshWithProgress } from "./repository-index.js";
@@ -14,6 +16,10 @@ const help = [
 ].join("\n");
 
 export default function piFlash(pi: ExtensionAPI): void {
+  const handoff = new HandoffController();
+  pi.on("session_shutdown", async () => {
+    handoff.spawnPending();
+  });
   pi.registerCommand("flash", {
     description: "Launch a fresh Pi session in an isolated Git worktree",
     handler: async (args, ctx) => {
@@ -55,12 +61,12 @@ export default function piFlash(pi: ExtensionAPI): void {
           return;
         }
         if (decision.kind === "auto") {
-          ctx.ui.notify(`Resolved ${decision.match.repository.nameWithOwner}. Worktree launch arrives in the next Pi Flash milestone.`, "info");
+          await launchRepository(ctx, handoff, config, decision.match.repository);
           return;
         }
         const repository = await pickRepository(ctx, decision.ranked.map((match) => match.repository), query);
         if (repository) {
-          ctx.ui.notify(`Selected ${repository.nameWithOwner}. Worktree launch arrives in the next Pi Flash milestone.`, "info");
+          await launchRepository(ctx, handoff, config, repository);
         }
       } catch (error) {
         reportError(ctx, error);

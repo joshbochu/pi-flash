@@ -20,13 +20,7 @@ function assertLogin(login: string): string {
 }
 
 export async function discoverGitHubIdentity(): Promise<GitHubIdentity> {
-  const user = await runCommand("gh", ["api", "--hostname", "github.com", "user", "--jq", ".login"], {
-    timeoutMs: 15_000,
-  });
-  if (user.code !== 0) {
-    throw new CommandError("GitHub authentication for github.com is required", user);
-  }
-  const login = assertLogin(lines(user.stdout)[0] ?? "");
+  const login = await getGitHubLogin();
 
   const organizations = await runCommand(
     "gh",
@@ -37,4 +31,15 @@ export async function discoverGitHubIdentity(): Promise<GitHubIdentity> {
     throw new CommandError("Could not discover GitHub organizations", organizations);
   }
   return { login, organizations: [...new Set(lines(organizations.stdout).map(assertLogin))].sort() };
+}
+
+/** Returns the active github.com identity used for default branch namespaces. */
+export async function getGitHubLogin(): Promise<string> {
+  const user = await runCommand("gh", ["api", "--hostname", "github.com", "user", "--jq", ".login"], {
+    timeoutMs: 15_000,
+  });
+  if (user.code !== 0) {
+    throw new CommandError("GitHub authentication for github.com is required", user);
+  }
+  return assertLogin(lines(user.stdout)[0] ?? "");
 }
