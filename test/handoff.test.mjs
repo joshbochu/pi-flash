@@ -22,7 +22,7 @@ async function waitForFile(path, timeoutMs = 5_000) {
   throw new Error(`timed out waiting for ${path}`);
 }
 
-test("handoff launches only after parent exit and preserves literal target cwd", async () => {
+test("handoff keeps its parent alive while launching in the literal target cwd", async () => {
   const temp = await mkdtemp(join(tmpdir(), "pi-flash-handoff-"));
   const target = join(temp, "target with $dollar;semicolon");
   const output = join(temp, "target.jsonl");
@@ -42,8 +42,11 @@ test("handoff launches only after parent exit and preserves literal target cwd",
 
   await waitForFile(output);
   const targetRun = JSON.parse((await readFile(output, "utf8")).trim());
-  const parentExit = Number((await readFile(eventLog, "utf8")).trim().split(" ")[1]);
+  const events = (await readFile(eventLog, "utf8")).trim().split("\n");
+  const replacementStart = Number(events[0].split(" ")[1]);
+  const parentExit = Number(events[1].split(" ")[1]);
 
   assert.equal(targetRun.cwd, await realpath(target));
-  assert.ok(targetRun.at >= parentExit, "replacement began after parent recorded exit");
+  assert.ok(targetRun.at >= replacementStart, "replacement began after the shutdown handler started it");
+  assert.ok(parentExit >= targetRun.at, "initiating process remained alive until the replacement exited");
 });

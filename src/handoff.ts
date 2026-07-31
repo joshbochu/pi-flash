@@ -11,7 +11,6 @@ export interface ReplacementRequest {
   targetCwd: string;
   invocation: PiInvocation;
   env?: NodeJS.ProcessEnv;
-  parentPid?: number;
 }
 
 /**
@@ -44,49 +43,23 @@ export function createFreshPiEnvironment(source: NodeJS.ProcessEnv = process.env
 
 /** Validates all preconditions before the parent begins terminal shutdown. */
 export function assertReplacementRequest(request: ReplacementRequest): void {
-  if (!Number.isSafeInteger(request.parentPid ?? process.pid) || (request.parentPid ?? process.pid) < 1) {
-    throw new Error("Pi Flash handoff requires a valid parent process id");
-  }
   if (!isAbsolute(request.targetCwd)) throw new Error("Pi Flash handoff requires an absolute worktree path");
   if (request.invocation.command.trim() === "") throw new Error("Pi Flash could not determine how to launch Pi");
 }
 
 /**
- * Starts a waiter that inherits this terminal and execs a blank Pi only after
- * its parent has fully exited. Dynamic values are positional shell arguments,
- * never shell source, so paths cannot become commands.
+ * Starts a blank Pi as a child of the initiating Pi. The shutdown handler must
+ * await this child: keeping the original foreground job alive prevents the
+ * user's shell from reclaiming the terminal before the replacement enables
+ * raw mode.
  */
 export function startReplacement(request: ReplacementRequest): ChildProcess {
   assertReplacementRequest(request);
-  const parentPid = request.parentPid ?? process.pid;
-  const script = [
-    'parent_pid="$1"',
-    'target_cwd="$2"',
-    'launcher="$3"',
-    "shift 3",
-    "attempts=0",
-    "while kill -0 \"$parent_pid\" 2>/dev/null; do",
-    "  attempts=$((attempts + 1))",
-    "  if [ \"$attempts\" -ge 1200 ]; then",
-    '    echo "Pi Flash handoff timed out waiting for the initiating Pi to exit." >&2',
-    "    exit 124",
-    "  fi",
-    "  sleep 0.05",
-    "done",
-    'cd "$target_cwd" || exit 126',
-    'exec "$launcher" "$@"',
-  ].join("\n");
   const child = spawn(
-    "/bin/sh",
-    ["-c", script, "pi-flash-handoff", String(parentPid), request.targetCwd, request.invocation.command, ...request.invocation.args],
+    request.invocation.command,
+    request.invocation.args,
     { cwd: request.targetCwd, env: createFreshPiEnvironment(request.env), stdio: "inherit", detached: false },
   );
-  child.once("error", (error) => {
-    // Pi has already restored the terminal by the time this child is expected
-    // to run. stderr is the only reliable recovery channel left to us.
-    process.stderr.write(`Pi Flash could not start the replacement Pi: ${error.message}\n`);
-  });
-  child.unref();
   return child;
 }
 
@@ -106,11 +79,29 @@ export class HandoffController {
     this.pending = request;
   }
 
-  /** Called only from Pi's graceful session-shutdown event. */
-  public spawnPending(): void {
+  /**
+   * Called only from Pi's graceful session-shutdown event, after Pi has
+   * restored the terminal. Resolves when the replacement exits so the
+   * initiating foreground job remains alive for the replacement's lifetime.
+   */
+  public async runPending(): Promise<void> {
     const request = this.pending;
     this.pending = undefined;
-    if (request) startReplacement(request);
+    if (!request) return;
+    const child = startReplacement(request);
+    await new Promise<void>((resolve) => {
+      let settled = false;
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        resolve();
+      };
+      child.once("error", (error) => {
+        process.stderr.write(`Pi Flash could not start the replacement Pi: ${error.message}\n`);
+        finish();
+      });
+      child.once("close", finish);
+    });
   }
 
   public cancel(): void {
