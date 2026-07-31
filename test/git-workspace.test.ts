@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -10,6 +11,41 @@ import { runCommand } from "../src/process.js";
 const directories: string[] = [];
 
 describe("Git worktree preparation", () => {
+  it("resolves a dynamic branch namespace while preparing the shared repository", async () => {
+    const sandbox = await createRepositorySandbox();
+    const config = createWorkspaceConfig(sandbox.workspaceRoot);
+    const repository = indexedRepository();
+    const barePath = getBareRepositoryPath(sandbox.workspaceRoot, repository);
+    let releaseNamespace!: () => void;
+    const namespaceReleased = new Promise<void>((resolve) => {
+      releaseNamespace = resolve;
+    });
+    let namespaceStarted!: () => void;
+    const didStartNamespace = new Promise<void>((resolve) => {
+      namespaceStarted = resolve;
+    });
+    let bareExistedWhenNamespaceStarted = true;
+
+    const preparing = prepareWorkspace(repository, config, async () => {
+      bareExistedWhenNamespaceStarted = existsSync(barePath);
+      namespaceStarted();
+      await namespaceReleased;
+      return "josh";
+    }, {
+      remoteUrl: sandbox.remoteUrl,
+      createPetName: () => "brisk-otter-000001",
+    });
+
+    await didStartNamespace;
+    expect(bareExistedWhenNamespaceStarted).toBe(false);
+    await waitForPath(barePath);
+    releaseNamespace();
+
+    await expect(preparing).resolves.toMatchObject({
+      branch: "josh/brisk-otter-000001",
+    });
+  });
+
   it("shares one partial bare clone while making a unique branch and worktree for every launch", async () => {
     const sandbox = await createRepositorySandbox();
     const config = createWorkspaceConfig(sandbox.workspaceRoot);
@@ -159,6 +195,14 @@ async function commitAndPush(sourcePath: string, file: string, content: string, 
 async function command(commandName: string, args: string[]): Promise<void> {
   const result = await runCommand(commandName, args, { timeoutMs: 30_000 });
   if (result.code !== 0) throw new Error(`${commandName} ${args.join(" ")} failed: ${result.stderr}`);
+}
+
+async function waitForPath(path: string): Promise<void> {
+  const deadline = Date.now() + 2_000;
+  while (!existsSync(path)) {
+    if (Date.now() >= deadline) throw new Error(`timed out waiting for ${path}`);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
 }
 
 afterEach(async () => {

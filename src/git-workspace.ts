@@ -26,6 +26,8 @@ export interface WorkspacePreparationOptions {
   now?: () => Date;
 }
 
+export type BranchNamespace = string | (() => Promise<string>);
+
 export class GitWorkspaceError extends Error {
   public constructor(message: string, options?: ErrorOptions) {
     super(message, options);
@@ -41,12 +43,14 @@ export class GitWorkspaceError extends Error {
 export async function prepareWorkspace(
   repository: RepositoryIndexEntry,
   config: Config,
-  branchNamespace: string,
+  branchNamespace: BranchNamespace,
   options: WorkspacePreparationOptions = {},
 ): Promise<WorkspacePreparation> {
   assertSafeSegment(repository.owner, "repository owner");
   assertSafeSegment(repository.name, "repository name");
-  assertSafeBranchComponent(branchNamespace, "branch namespace");
+  if (typeof branchNamespace === "string") {
+    assertSafeBranchComponent(branchNamespace, "branch namespace");
+  }
   assertSafeBranchComponent(repository.defaultBranch, "default branch");
 
   const repositoryLock = join(
@@ -72,32 +76,39 @@ export async function prepareWorkspace(
 async function prepareWorkspaceLocked(
   repository: RepositoryIndexEntry,
   config: Config,
-  branchNamespace: string,
+  branchNamespace: BranchNamespace,
   options: WorkspacePreparationOptions,
 ): Promise<WorkspacePreparation> {
   const remoteUrl = options.remoteUrl ?? `https://github.com/${repository.nameWithOwner}.git`;
   const barePath = join(config.workspaceRoot, ".flash", "repos", repository.owner, `${repository.name}.git`);
   const worktreeParent = join(config.workspaceRoot, "worktrees", repository.owner, repository.name);
-  const bareExists = await directoryExists(barePath);
-  let base: { sha: string; stale: boolean; attempts: number; lastFetchedAt: string };
-
-  if (bareExists) {
-    await verifyOrigin(barePath, remoteUrl);
-    base = await fetchDefaultBranch(barePath, repository.defaultBranch, config, options);
-  } else {
-    await mkdir(join(config.workspaceRoot, ".flash", "repos", repository.owner), { recursive: true, mode: 0o700 });
-    await cloneBareRepository(barePath, remoteUrl);
-    base = await captureClonedDefaultBranch(barePath, repository.defaultBranch, options.now);
-  }
+  // Resolving the active GitHub login and refreshing the repository are
+  // independent network operations. Run them together so a normal launch
+  // pays for the slower one instead of both back-to-back.
+  const [baseResult, namespaceResult] = await Promise.allSettled([
+    prepareBase(repository, config, options, barePath, remoteUrl),
+    resolveBranchNamespace(branchNamespace),
+  ]);
+  // Both operations are allowed to settle before the repository lock is
+  // released; a failed login must not leave a fetch mutating the bare repo
+  // outside its serialization boundary.
+  if (baseResult.status === "rejected") throw baseResult.reason;
+  if (namespaceResult.status === "rejected") throw namespaceResult.reason;
+  const base = baseResult.value;
+  const resolvedBranchNamespace = namespaceResult.value;
 
   await mkdir(worktreeParent, { recursive: true, mode: 0o700 });
   const createPetName = options.createPetName ?? createPetNameDefault;
   for (let attempt = 0; attempt < 32; attempt += 1) {
     const petName = createPetName();
     assertSafeSegment(petName, "generated worktree name");
-    const branch = `${branchNamespace}/${petName}`;
+    const branch = `${resolvedBranchNamespace}/${petName}`;
     const worktreePath = join(worktreeParent, petName);
-    if (await pathExists(worktreePath) || await branchExists(barePath, branch)) continue;
+    const [worktreeExists, branchAlreadyExists] = await Promise.all([
+      pathExists(worktreePath),
+      branchExists(barePath, branch),
+    ]);
+    if (worktreeExists || branchAlreadyExists) continue;
 
     const added = await git(barePath, ["worktree", "add", "-b", branch, worktreePath, base.sha]);
     if (added.code === 0) {
@@ -114,10 +125,39 @@ async function prepareWorkspaceLocked(
     // A concurrent invocation may have won this pet-name/branch race. Try a
     // fresh name only for an already-exists response; surface all other Git
     // failures rather than guessing which state is safe to delete.
-    if (await pathExists(worktreePath) || await branchExists(barePath, branch)) continue;
+    const [racedWorktree, racedBranch] = await Promise.all([
+      pathExists(worktreePath),
+      branchExists(barePath, branch),
+    ]);
+    if (racedWorktree || racedBranch) continue;
     throw commandFailure("Could not create the isolated Git worktree.", added);
   }
   throw new GitWorkspaceError("Could not allocate a unique Pi Flash worktree name after 32 attempts.");
+}
+
+async function prepareBase(
+  repository: RepositoryIndexEntry,
+  config: Config,
+  options: WorkspacePreparationOptions,
+  barePath: string,
+  remoteUrl: string,
+): Promise<{ sha: string; stale: boolean; attempts: number; lastFetchedAt: string }> {
+  if (await directoryExists(barePath)) {
+    await verifyOrigin(barePath, remoteUrl);
+    return fetchDefaultBranch(barePath, repository.defaultBranch, config, options);
+  }
+
+  await mkdir(join(config.workspaceRoot, ".flash", "repos", repository.owner), { recursive: true, mode: 0o700 });
+  await cloneBareRepository(barePath, remoteUrl);
+  return captureClonedDefaultBranch(barePath, repository.defaultBranch, options.now);
+}
+
+async function resolveBranchNamespace(branchNamespace: BranchNamespace): Promise<string> {
+  const resolved = typeof branchNamespace === "string"
+    ? branchNamespace
+    : await branchNamespace();
+  assertSafeBranchComponent(resolved, "branch namespace");
+  return resolved;
 }
 
 export function getBareRepositoryPath(workspaceRoot: string, repository: Pick<RepositoryIndexEntry, "owner" | "name">): string {
@@ -170,7 +210,11 @@ async function fetchDefaultBranch(
   const sleep = options.sleep ?? defaultSleep;
 
   for (let attempt = 1; attempt <= config.fetch.attempts; attempt += 1) {
-    const result = await git(barePath, ["fetch", "--no-tags", "origin", `+refs/heads/${defaultBranch}:${cacheRef}`], config.fetch.timeoutSeconds * 1_000);
+    const result = await git(
+      barePath,
+      ["fetch", "--no-tags", "--no-write-fetch-head", "origin", `+refs/heads/${defaultBranch}:${cacheRef}`],
+      config.fetch.timeoutSeconds * 1_000,
+    );
     if (result.code === 0) {
       const sha = await resolveCommit(barePath, cacheRef);
       if (!sha) throw new GitWorkspaceError(`Git fetched ${defaultBranch} but did not provide a usable commit.`);
