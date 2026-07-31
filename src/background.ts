@@ -327,7 +327,7 @@ function getWorkerInvocation(): { command: string; args: string[] } {
     || "bun" in process.versions;
   const isNode = runtimeName === "node" || runtimeName === "node.exe";
   const runtime = isBun || isNode ? process.execPath : "node";
-  const compiledWorker = join(moduleDirectory, "background-worker.js");
+  const compiledWorker = join(moduleDirectory, "background-worker.mjs");
   if (existsSync(compiledWorker)) return { command: runtime, args: [compiledWorker] };
   const sourceWorker = join(moduleDirectory, "background-worker.ts");
   const sourceLoader = join(moduleDirectory, "typescript-loader.mjs");

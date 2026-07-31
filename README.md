@@ -17,7 +17,8 @@ sources, the workspace root, matching, and conservative cleanup behavior.
 On first use, `/flash` opens a welcome overlay. It verifies `git`, `gh`, and
 Pi, discovers your GitHub account and organizations through `gh`, lets you
 enable the accounts to index, and records your chosen workspace root. Pi Flash
-stores only its own configuration below `PI_CODING_AGENT_DIR` (or
+also caches that verified login for branch naming, so launching does not repeat
+a GitHub identity lookup. It stores only its own configuration below `PI_CODING_AGENT_DIR` (or
 `~/.pi/agent` when that variable is unset).
 
 Use `/flash billing` to search repository names. Include a slash, as in
@@ -49,6 +50,8 @@ The selected workspace defaults to `~/dev`. A repository uses one compact
 partial bare clone at `<workspace>/.flash/repos/<owner>/<repo>.git`; every
 launch creates a separate branch and worktree at
 `<workspace>/worktrees/<owner>/<repo>/<petname>`.
+The remote default branch is fetched on every launch, and Git may use all
+logical cores while checking out the new worktree.
 
 Cleanup is intentionally conservative. It starts report-only, considers only
 worktrees already registered by Pi Flash, skips active or recent worktrees, and
@@ -68,6 +71,9 @@ npm run check
 npm test
 pi -e ./src/index.ts
 ```
+
+Published packages load precompiled bundles; the TypeScript entry point above
+is kept for local extension development.
 
 See [docs/architecture.md](docs/architecture.md) and
 [docs/acceptance.md](docs/acceptance.md) for the product contract.

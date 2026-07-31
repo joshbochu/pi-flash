@@ -4,8 +4,8 @@
 
 - First `/flash` opens setup rather than failing mysteriously.
 - Setup verifies `git`, `gh`, and GitHub authentication, discovers the active
-  account and organizations, records enabled sources, and lets the user choose
-  a workspace root.
+  account and organizations, caches that login as the branch namespace, records
+  enabled sources, and lets the user choose a workspace root.
 - A completed setup creates a local index.
 - A populated index older than 24 hours refreshes in the background.
 - The refresh worker survives replacement of the initiating Pi process.
@@ -30,9 +30,11 @@
 - Concurrent first invocations share one serialized bare clone and still create
   distinct worktrees.
 - Repositories with the same name under different owners cannot share storage.
-- The remote default branch is fetched before normal launch.
-- Active GitHub login discovery overlaps repository preparation instead of
-  adding a second serial network round trip.
+- The remote default branch is fetched before every normal launch.
+- Normal launches reuse the login verified during setup instead of repeating a
+  GitHub identity network round trip.
+- Worktree checkout may use all logical cores without changing global Git
+  configuration.
 - A first clone does not perform a redundant fetch.
 - Fetch uses three attempts total by default.
 - A failed fetch with a verified cached ref creates a visibly stale worktree;
@@ -42,6 +44,8 @@
 ## Pi handoff
 
 - A successful launch replaces the current Pi in the same terminal.
+- On Node.js, the replacement retains the foreground process PID; repeated
+  launches do not accumulate dormant Pi parents.
 - The replacement Pi starts in the created worktree.
 - The new session is blank and uses normal Pi defaults.
 - Exiting the replacement Pi returns to the shell, not the initiating Pi.
@@ -70,5 +74,7 @@
 - After the deferred public release,
   `pi install npm:@joshbochu/pi-flash` installs the package.
 - npm package contents exclude test-only and development-only files.
+- The published extension and detached worker are precompiled JavaScript and
+  run without a TypeScript loader.
 - Type checking, tests, package verification, and clean-room installation pass
   before automatic publication.

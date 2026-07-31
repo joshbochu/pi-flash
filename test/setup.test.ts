@@ -66,6 +66,7 @@ describe("interactive setup", () => {
     expect(mocks.validateWorkspaceRoot).toHaveBeenCalledWith("/example/home/existing-dev");
     expect(mocks.writeConfig).toHaveBeenCalledWith(expect.objectContaining({
       workspaceRoot: "/example/home/existing-dev",
+      branchNamespace: "octo",
       matching: expect.objectContaining({
         autoLaunchThreshold: 0.9,
         minimumLeadOverSecond: 0.05,
@@ -79,6 +80,7 @@ describe("interactive setup", () => {
       autoLaunchThreshold: 0.9,
       minimumLeadOverSecond: 0.05,
     });
+    expect(result?.config.branchNamespace).toBe("octo");
   });
 
   it("keeps matching defaults when both matching prompts are submitted empty", async () => {
@@ -90,6 +92,7 @@ describe("interactive setup", () => {
     const result = await runSetup(context);
 
     expect(result?.config.workspaceRoot).toBe("/example/home/dev");
+    expect(result?.config.branchNamespace).toBe("octo");
     expect(result?.config.matching).toEqual(existing.matching);
   });
 });

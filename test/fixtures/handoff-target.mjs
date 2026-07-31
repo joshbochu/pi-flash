@@ -10,5 +10,5 @@ if (process.env.PI_FLASH_TEST_RAW_MODE === "1") {
 }
 await appendFile(
   output,
-  JSON.stringify({ cwd: process.cwd(), at: Date.now(), argv: process.argv.slice(2) }) + "\n",
+  JSON.stringify({ cwd: process.cwd(), at: Date.now(), pid: process.pid, argv: process.argv.slice(2) }) + "\n",
 );
