@@ -11,6 +11,17 @@ import { runCommand } from "../src/process.js";
 const directories: string[] = [];
 
 describe("Git worktree preparation", () => {
+  it("uses a five-character hex suffix for generated worktree names", async () => {
+    const sandbox = await createRepositorySandbox();
+    const config = createWorkspaceConfig(sandbox.workspaceRoot);
+
+    const workspace = await prepareWorkspace(indexedRepository(), config, "josh", {
+      remoteUrl: sandbox.remoteUrl,
+    });
+
+    expect(workspace.branch).toMatch(/^josh\/[a-z]+-[a-z]+-[0-9a-f]{5}$/);
+  });
+
   it("resolves a dynamic branch namespace while preparing the shared repository", async () => {
     const sandbox = await createRepositorySandbox();
     const config = createWorkspaceConfig(sandbox.workspaceRoot);
