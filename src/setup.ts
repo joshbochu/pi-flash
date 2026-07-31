@@ -57,6 +57,9 @@ export async function runSetup(ctx: ExtensionCommandContext): Promise<SetupResul
 
     config.workspaceRoot = root.path;
     config.sources = Object.fromEntries(owners.map((owner) => [owner, enabledOwners.has(owner)]));
+    // Discovery already authenticated this login during setup. Persist it as
+    // the normal branch namespace so launches do not repeat `gh api user`.
+    config.branchNamespace = identity.login;
     config.matching.autoLaunchThreshold = autoLaunchThreshold;
     config.matching.minimumLeadOverSecond = minimumLeadOverSecond;
     const saved = await writeConfig(config, { createWorkspaceRoot: root.created });

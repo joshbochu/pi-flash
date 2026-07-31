@@ -14,7 +14,7 @@ an actionable migration error; absent values are filled from documented defaults
     "joshbochu": true,
     "example-org": false
   },
-  "branchNamespace": null,
+  "branchNamespace": "joshbochu",
   "matching": {
     "autoLaunchThreshold": 0.82,
     "minimumLeadOverSecond": 0.08,
@@ -35,11 +35,13 @@ an actionable migration error; absent values are filled from documented defaults
 }
 ```
 
-`branchNamespace: null` means the active GitHub login. `untrackedFiles` is
-either `block` or `include-unignored`; `ignoredFiles` is `block` or
-`discard`. Both values default to `block`. New workspace roots are canonicalized
-before storage and must not resolve to the filesystem root, the home directory,
-or the Pi agent directory.
+Setup records the authenticated GitHub login in `branchNamespace`, avoiding a
+second identity lookup during every launch. A manually configured `null` value
+retains the dynamic active-login behavior. `untrackedFiles` is either `block`
+or `include-unignored`; `ignoredFiles` is `block` or `discard`. Both values
+default to `block`. New workspace roots are canonicalized before storage and
+must not resolve to the filesystem root, the home directory, or the Pi agent
+directory.
 
 ## Repository index
 

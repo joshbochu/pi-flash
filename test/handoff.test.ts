@@ -1,7 +1,13 @@
 import { fileURLToPath } from "node:url";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
-import { HandoffController, assertReplacementRequest, createFreshPiEnvironment, getCurrentPiInvocation } from "../src/handoff.js";
+import {
+  HandoffController,
+  assertReplacementRequest,
+  createFreshPiEnvironment,
+  getCurrentPiInvocation,
+  replaceCurrentProcess,
+} from "../src/handoff.js";
 
 describe("Pi replacement handoff", () => {
   it("uses the currently running script when it is a real file", () => {
@@ -32,13 +38,33 @@ describe("Pi replacement handoff", () => {
     expect(() => assertReplacementRequest({ targetCwd: "/tmp", invocation: { command: "", args: [] } })).toThrow("determine");
   });
 
-  it("does not spawn a replacement until session shutdown consumes a scheduled request", async () => {
+  it("changes directory and execs the replacement with a fresh session environment", () => {
+    const replaced = new Error("execve replaced the test process");
+    const changeDirectory = vi.fn();
+    const execve = vi.fn((_file: string, _args?: readonly string[], _env?: NodeJS.ProcessEnv): never => {
+      throw replaced;
+    });
+
+    expect(() => replaceCurrentProcess({
+      targetCwd: "/tmp/next worktree",
+      invocation: { command: process.execPath, args: ["/opt/pi/cli.js"] },
+      env: { PATH: process.env.PATH, PI_SESSION_ID: "old", OTHER: "kept" },
+    }, { changeDirectory, execve })).toThrow(replaced);
+
+    expect(changeDirectory).toHaveBeenCalledWith("/tmp/next worktree");
+    expect(execve).toHaveBeenCalledWith(
+      process.execPath,
+      [process.execPath, "/opt/pi/cli.js"],
+      expect.objectContaining({ PWD: "/tmp/next worktree", OTHER: "kept" }),
+    );
+    expect(execve.mock.calls[0]?.[2]).not.toHaveProperty("PI_SESSION_ID");
+  });
+
+  it("does not arm a replacement after a scheduled request is cancelled", async () => {
     const controller = new HandoffController();
     const request = controller.preflight("/tmp");
     controller.schedule(request);
     controller.cancel();
-    // This must be a no-op after cancellation. The integration handoff test
-    // covers actual child timing without putting a real child on this process.
-    await controller.runPending();
+    await controller.completePendingReplacement();
   });
 });

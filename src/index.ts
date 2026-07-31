@@ -43,7 +43,7 @@ export default function piFlash(pi: ExtensionAPI): void {
   pi.on("session_shutdown", async (_event, ctx) => {
     stopLeaseHeartbeat();
     await clearWorktreeLeaseForPath(ctx.cwd, process.pid).catch(() => undefined);
-    await handoff.runPending();
+    await handoff.completePendingReplacement();
   });
   pi.registerCommand("flash", {
     description: "Launch a fresh Pi session in an isolated Git worktree",

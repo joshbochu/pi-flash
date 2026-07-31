@@ -1,22 +1,11 @@
-import { appendFile } from "node:fs/promises";
-import { startReplacement } from "../../prototypes/handoff.mjs";
+import { HandoffController } from "../../src/handoff.ts";
 
-const [targetCwd, launcher, output, ...launcherArgs] = process.argv.slice(2);
-const eventLog = process.env.PI_FLASH_TEST_EVENT_LOG;
-
-const child = startReplacement({
+const [targetCwd, launcher, output, targetFixture] = process.argv.slice(2);
+const controller = new HandoffController();
+controller.schedule({
   targetCwd,
-  launcher,
-  launcherArgs: [...launcherArgs, output],
+  invocation: { command: launcher, args: [targetFixture, output] },
   env: process.env,
 });
-
-await appendFile(eventLog, `replacement-started ${Date.now()}\n`);
-await new Promise((resolve, reject) => {
-  child.once("error", reject);
-  child.once("close", (code, signal) => {
-    if (code === 0) resolve();
-    else reject(new Error(`replacement exited ${code ?? signal}`));
-  });
-});
-await appendFile(eventLog, `parent-exiting ${Date.now()}\n`);
+await controller.completePendingReplacement();
+process.exit(0);

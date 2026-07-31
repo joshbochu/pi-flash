@@ -1,6 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import { existsSync } from "node:fs";
-import { isAbsolute } from "node:path";
+import { accessSync, constants, existsSync, statSync, writeSync } from "node:fs";
+import { delimiter, isAbsolute, resolve } from "node:path";
 
 export interface PiInvocation {
   command: string;
@@ -11,6 +11,13 @@ export interface ReplacementRequest {
   targetCwd: string;
   invocation: PiInvocation;
   env?: NodeJS.ProcessEnv;
+}
+
+type Execve = (file: string, args?: readonly string[], env?: NodeJS.ProcessEnv) => never;
+
+export interface ProcessReplacementOptions {
+  changeDirectory?: (directory: string) => void;
+  execve?: Execve;
 }
 
 /**
@@ -25,14 +32,14 @@ export function getCurrentPiInvocation(
 ): PiInvocation {
   const bunVirtualScript = currentScript?.startsWith("/$bunfs/root/") ?? false;
   if (currentScript && !bunVirtualScript && existsSync(currentScript)) {
-    return { command: runtimePath, args: [currentScript] };
+    return { command: runtimePath, args: [resolve(currentScript)] };
   }
   const executable = runtimePath.split(/[\\/]/).at(-1)?.toLowerCase() ?? "";
   if (/^(node|bun)(\.exe)?$/.test(executable)) return { command: "pi", args: [] };
   return { command: runtimePath, args: [] };
 }
 
-/** Ensures the child gets no explicit Pi session selection from this process. */
+/** Ensures the replacement gets no explicit Pi session selection. */
 export function createFreshPiEnvironment(source: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
   const environment: NodeJS.ProcessEnv = { ...source };
   for (const key of Object.keys(environment)) {
@@ -47,64 +54,127 @@ export function assertReplacementRequest(request: ReplacementRequest): void {
   if (request.invocation.command.trim() === "") throw new Error("Pi Flash could not determine how to launch Pi");
 }
 
+/** Resolves a command before shutdown because execve deliberately does no PATH lookup. */
+export function resolveExecutable(command: string, environment: NodeJS.ProcessEnv = process.env): string {
+  const candidates = isAbsolute(command)
+    ? [command]
+    : (environment.PATH ?? "").split(delimiter).map((directory) => resolve(directory || ".", command));
+
+  for (const candidate of candidates) {
+    try {
+      accessSync(candidate, constants.X_OK);
+      if (statSync(candidate).isFile()) return candidate;
+    } catch {
+      // Try the next PATH entry.
+    }
+  }
+  throw new Error(`Pi Flash could not find an executable launcher for ${JSON.stringify(command)}`);
+}
+
 /**
- * Starts a blank Pi as a child of the initiating Pi. The shutdown handler must
- * await this child: keeping the original foreground job alive prevents the
- * user's shell from reclaiming the terminal before the replacement enables
- * raw mode.
+ * Atomically replaces the current process with a blank Pi in the worktree.
+ * The PID, process group, and inherited terminal descriptors stay unchanged.
  */
-export function startReplacement(request: ReplacementRequest): ChildProcess {
+export function replaceCurrentProcess(
+  request: ReplacementRequest,
+  options: ProcessReplacementOptions = {},
+): never {
   assertReplacementRequest(request);
-  const child = spawn(
-    request.invocation.command,
-    request.invocation.args,
-    { cwd: request.targetCwd, env: createFreshPiEnvironment(request.env), stdio: "inherit", detached: false },
-  );
-  return child;
+  const execve = options.execve ?? process.execve;
+  if (!execve) {
+    throw new Error("Pi Flash process replacement requires Node.js execve support on this platform");
+  }
+  const environment = createFreshPiEnvironment(request.env);
+  environment.PWD = request.targetCwd;
+  const command = resolveExecutable(request.invocation.command, environment);
+  (options.changeDirectory ?? process.chdir)(request.targetCwd);
+  return execve(command, [command, ...request.invocation.args], environment);
+}
+
+/** Compatibility path for Pi runtimes, such as Bun, that lack process.execve. */
+export function startReplacementChild(request: ReplacementRequest): ChildProcess {
+  assertReplacementRequest(request);
+  const environment = createFreshPiEnvironment(request.env);
+  environment.PWD = request.targetCwd;
+  const command = resolveExecutable(request.invocation.command, environment);
+  return spawn(command, request.invocation.args, {
+    cwd: request.targetCwd,
+    env: environment,
+    stdio: "inherit",
+    detached: false,
+  });
 }
 
 export class HandoffController {
   private pending: ReplacementRequest | undefined;
+  private exitListener: (() => void) | undefined;
 
   public preflight(targetCwd: string): ReplacementRequest {
-    const request: ReplacementRequest = { targetCwd, invocation: getCurrentPiInvocation() };
+    const environment = createFreshPiEnvironment();
+    const invocation = getCurrentPiInvocation();
+    invocation.command = resolveExecutable(invocation.command, environment);
+    const request: ReplacementRequest = { targetCwd, invocation, env: environment };
     assertReplacementRequest(request);
     return request;
   }
 
-  /** Records a fully preflighted request; it does not spawn a process yet. */
+  /** Records a fully preflighted request; it does not replace the process yet. */
   public schedule(request: ReplacementRequest): void {
-    if (this.pending) throw new Error("Pi Flash already has a replacement Pi pending");
+    if (this.pending || this.exitListener) throw new Error("Pi Flash already has a replacement Pi pending");
     assertReplacementRequest(request);
     this.pending = request;
   }
 
   /**
-   * Called only from Pi's graceful session-shutdown event, after Pi has
-   * restored the terminal. Resolves when the replacement exits so the
-   * initiating foreground job remains alive for the replacement's lifetime.
+   * Completes the handoff after Pi's asynchronous shutdown work. Node arms an
+   * exit listener; runtimes without execve wait for the compatible child.
    */
-  public async runPending(): Promise<void> {
+  public async completePendingReplacement(): Promise<void> {
     const request = this.pending;
     this.pending = undefined;
     if (!request) return;
-    const child = startReplacement(request);
-    await new Promise<void>((resolve) => {
-      let settled = false;
-      const finish = () => {
-        if (settled) return;
-        settled = true;
-        resolve();
-      };
-      child.once("error", (error) => {
-        process.stderr.write(`Pi Flash could not start the replacement Pi: ${error.message}\n`);
-        finish();
-      });
-      child.once("close", finish);
-    });
+
+    if (!process.execve) {
+      await waitForReplacementChild(startReplacementChild(request));
+      return;
+    }
+
+    const listener = () => {
+      this.exitListener = undefined;
+      try {
+        replaceCurrentProcess(request);
+      } catch (error: unknown) {
+        const detail = error instanceof Error ? error.message : String(error);
+        try {
+          writeSync(process.stderr.fd, `Pi Flash could not start the replacement Pi: ${detail}\n`);
+        } catch {
+          // The process is already exiting; there is no further recovery path.
+        }
+      }
+    };
+    this.exitListener = listener;
+    process.once("exit", listener);
   }
 
   public cancel(): void {
     this.pending = undefined;
+    if (this.exitListener) process.removeListener("exit", this.exitListener);
+    this.exitListener = undefined;
   }
+}
+
+async function waitForReplacementChild(child: ChildProcess): Promise<void> {
+  await new Promise<void>((resolve) => {
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      resolve();
+    };
+    child.once("error", (error) => {
+      process.stderr.write(`Pi Flash could not start the replacement Pi: ${error.message}\n`);
+      finish();
+    });
+    child.once("close", finish);
+  });
 }

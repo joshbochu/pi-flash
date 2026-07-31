@@ -110,7 +110,18 @@ async function prepareWorkspaceLocked(
     ]);
     if (worktreeExists || branchAlreadyExists) continue;
 
-    const added = await git(barePath, ["worktree", "add", "-b", branch, worktreePath, base.sha]);
+    // Let Git use all logical cores for the checkout phase. The setting is
+    // scoped to this command and does not alter the user's Git configuration.
+    const added = await git(barePath, [
+      "-c",
+      "checkout.workers=0",
+      "worktree",
+      "add",
+      "-b",
+      branch,
+      worktreePath,
+      base.sha,
+    ]);
     if (added.code === 0) {
       return {
         barePath,

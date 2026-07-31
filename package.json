@@ -25,7 +25,7 @@
     "agent"
   ],
   "files": [
-    "src",
+    "dist",
     "docs",
     "README.md",
     "ROADMAP.md",
@@ -33,14 +33,17 @@
   ],
   "pi": {
     "extensions": [
-      "./src/index.ts"
+      "./dist/index.js"
     ]
   },
   "scripts": {
+    "build": "rolldown -c rolldown.config.mjs",
     "check": "tsc --noEmit",
-    "test": "vitest run && npm run test:handoff",
+    "test": "vitest run && npm run test:handoff && npm run test:distribution",
+    "test:distribution": "npm run build && node --test test/distribution.test.mjs",
     "test:handoff": "node --test test/handoff.test.mjs",
-    "pack:check": "npm pack --dry-run"
+    "pack:check": "npm pack --dry-run",
+    "prepack": "npm run build"
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*",
@@ -50,6 +53,7 @@
     "@earendil-works/pi-coding-agent": "0.80.6",
     "@earendil-works/pi-tui": "0.80.6",
     "@types/node": "22.19.0",
+    "rolldown": "1.2.1",
     "typescript": "5.9.3",
     "vitest": "4.1.9"
   },

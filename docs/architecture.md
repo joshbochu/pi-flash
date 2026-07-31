@@ -51,11 +51,14 @@ lose state or race the first clone.
 4. Pi Flash supports GitHub.com in the initial release and ensures the
    owner/repository-namespaced bare clone exists and matches its
    expected remote.
-5. Fetch the bare clone. On failure after configured retries, use a verified
+5. Fetch the bare clone on every launch. On failure after configured retries, use a verified
    cached base ref and record its staleness.
-6. Create a unique branch and worktree from the remote default branch.
+6. Create a unique branch and worktree from the remote default branch, allowing
+   Git to parallelize checkout without changing the user's Git configuration.
 7. Record the worktree in the registry and history.
-8. Start the replacement Pi process in the worktree and shut down the parent.
+8. Gracefully shut down Pi, then replace that same Node.js process with a blank
+   Pi in the worktree; runtimes without `execve` retain the compatible child
+   handoff.
 
 Any failure before handoff leaves the initiating Pi usable. A worktree created
 before a failed handoff remains registered and is surfaced in history so it can
