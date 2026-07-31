@@ -311,7 +311,7 @@ function createPetNameDefault(): string {
   const animals = ["badger", "falcon", "gecko", "otter", "panda", "raven", "tiger", "wren", "yak", "zebra"];
   const adjective = adjectives[randomBytes(1)[0]! % adjectives.length]!;
   const animal = animals[randomBytes(1)[0]! % animals.length]!;
-  const suffix = randomBytes(3).toString("hex");
+  const suffix = randomBytes(3).toString("hex").slice(0, 5);
   return `${adjective}-${animal}-${suffix}`;
 }
 
