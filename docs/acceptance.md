@@ -33,6 +33,8 @@
 - The remote default branch is fetched before every normal launch.
 - Normal launches reuse the login verified during setup instead of repeating a
   GitHub identity network round trip.
+- When a dynamic active login is explicitly configured, its discovery overlaps
+  repository preparation instead of adding a serial network round trip.
 - Worktree checkout may use all logical cores without changing global Git
   configuration.
 - A first clone does not perform a redundant fetch.
