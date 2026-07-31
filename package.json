@@ -1,6 +1,6 @@
 {
   "name": "@joshbochu/pi-flash",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Launch fresh, isolated Pi sessions in Git worktrees.",
   "type": "module",
   "license": "MIT",
