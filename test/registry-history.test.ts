@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
-import { appendHistory, getHistoryPath, readHistory, recordCreatedWorktree } from "../src/history.js";
+import { appendHistory, getHistoryPath, readHistory, recordCreatedWorktree, recordLaunchedWorktree } from "../src/history.js";
 import { claimWorktreeForCleanup, getRegistryPath, parseRegistry, readRegistry, registerWorktree } from "../src/registry.js";
 
 const directories: string[] = [];
@@ -21,6 +21,21 @@ describe("worktree registry and history", () => {
     expect((await stat(getRegistryPath(sandbox.options))).mode & 0o777).toBe(0o600);
     expect((await stat(getHistoryPath(sandbox.options))).mode & 0o777).toBe(0o600);
     expect(await readFile(getHistoryPath(sandbox.options), "utf8")).not.toContain("https://");
+  });
+
+  it("records a complete launch audit trail in order", async () => {
+    const sandbox = await createSandbox();
+    const record = await registerWorktree(repository, workspace, { ...sandbox.options, id: () => id });
+
+    await recordLaunchedWorktree(record, repository, workspace, {
+      ...sandbox.options,
+      now: () => new Date("2026-07-30T12:00:01.000Z"),
+    });
+
+    expect((await readHistory(sandbox.options)).map((entry) => entry.event)).toEqual([
+      "worktree-created",
+      "handoff-scheduled",
+    ]);
   });
 
   it("records stale fallback separately and supports an atomic cleanup claim", async () => {

@@ -30,7 +30,16 @@ export function getHistoryPath(options: ConfigLocationOptions = {}): string {
 
 /** Appends one compact, credential-free audit event. */
 export async function appendHistory(entry: HistoryEntry, options: ConfigLocationOptions = {}): Promise<void> {
-  const parsed = parseHistoryEntry(entry);
+  await appendHistoryEntries([entry], options);
+}
+
+/** Appends related audit events with one durable file sync. */
+export async function appendHistoryEntries(
+  entries: readonly HistoryEntry[],
+  options: ConfigLocationOptions = {},
+): Promise<void> {
+  if (entries.length === 0) return;
+  const parsed = entries.map(parseHistoryEntry);
   const stateDirectory = getFlashStateDirectory(options);
   const historyPath = getHistoryPath(options);
   let handle: Awaited<ReturnType<typeof open>> | undefined;
@@ -38,7 +47,7 @@ export async function appendHistory(entry: HistoryEntry, options: ConfigLocation
     await mkdir(stateDirectory, { recursive: true, mode: 0o700 });
     await chmod(stateDirectory, 0o700);
     handle = await open(historyPath, "a", 0o600);
-    await handle.writeFile(`${JSON.stringify(parsed)}\n`, "utf8");
+    await handle.writeFile(`${parsed.map((entry) => JSON.stringify(entry)).join("\n")}\n`, "utf8");
     await handle.sync();
     await handle.close();
     handle = undefined;
@@ -75,7 +84,34 @@ export async function recordCreatedWorktree(
   options: ConfigLocationOptions & { now?: () => Date } = {},
 ): Promise<void> {
   const at = (options.now?.() ?? new Date()).toISOString();
-  await appendHistory({
+  await appendHistoryEntries(createdWorktreeHistoryEntries(record, repository, workspace, at), options);
+}
+
+/** Records the complete launch audit trail with one durable file sync. */
+export async function recordLaunchedWorktree(
+  record: WorktreeRecord,
+  repository: RepositoryIndexEntry,
+  workspace: WorkspacePreparation,
+  options: ConfigLocationOptions & { now?: () => Date } = {},
+): Promise<void> {
+  const at = (options.now?.() ?? new Date()).toISOString();
+  const entries = createdWorktreeHistoryEntries(record, repository, workspace, at);
+  entries.push({
+    version: HISTORY_VERSION,
+    at,
+    event: "handoff-scheduled",
+    metadata: { id: record.id, repo: repository.nameWithOwner, branch: workspace.branch, path: workspace.worktreePath },
+  });
+  await appendHistoryEntries(entries, options);
+}
+
+function createdWorktreeHistoryEntries(
+  record: WorktreeRecord,
+  repository: RepositoryIndexEntry,
+  workspace: WorkspacePreparation,
+  at: string,
+): HistoryEntry[] {
+  const entries: HistoryEntry[] = [{
     version: HISTORY_VERSION,
     at,
     event: "worktree-created",
@@ -87,15 +123,16 @@ export async function recordCreatedWorktree(
       baseSha: workspace.baseSha,
       stale: workspace.stale,
     },
-  }, options);
+  }];
   if (workspace.stale) {
-    await appendHistory({
+    entries.push({
       version: HISTORY_VERSION,
       at,
       event: "stale-fallback",
       metadata: { id: record.id, repo: repository.nameWithOwner, baseSha: workspace.baseSha, fetchedAt: workspace.lastFetchedAt, attempts: workspace.attempts },
-    }, options);
+    });
   }
+  return entries;
 }
 
 export function parseHistoryEntry(value: unknown): HistoryEntry {

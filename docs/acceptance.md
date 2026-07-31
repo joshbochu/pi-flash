@@ -31,6 +31,8 @@
   distinct worktrees.
 - Repositories with the same name under different owners cannot share storage.
 - The remote default branch is fetched before normal launch.
+- Active GitHub login discovery overlaps repository preparation instead of
+  adding a second serial network round trip.
 - A first clone does not perform a redundant fetch.
 - Fetch uses three attempts total by default.
 - A failed fetch with a verified cached ref creates a visibly stale worktree;

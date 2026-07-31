@@ -79,12 +79,16 @@ export default function piFlash(pi: ExtensionAPI): void {
           await runCleanupCommand(ctx, query, config);
           return;
         }
-        await scheduleAutomaticCleanup(config);
+        // Queue maintenance early, but overlap its filesystem/process startup
+        // with index reads and any time spent in the picker.
+        const cleanupScheduled = scheduleAutomaticCleanup(config);
         if (query === "refresh") {
+          await cleanupScheduled;
           await refreshWithProgress(ctx, config);
           return;
         }
         if (query === "history") {
+          await cleanupScheduled;
           const history = await readHistory();
           if (history.length === 0) {
             ctx.ui.notify("Pi Flash history is empty.", "info");
@@ -97,16 +101,21 @@ export default function piFlash(pi: ExtensionAPI): void {
         const index = await ensureRepositoryIndex(config);
         const decision = decideRepositoryMatch(query, index.repos, config.matching);
         if (decision.kind === "none") {
+          await cleanupScheduled;
           ctx.ui.notify(`No indexed repository matches ${JSON.stringify(query)}. Run /flash refresh to update the cache.`, "warning");
           return;
         }
         if (decision.kind === "auto") {
+          await cleanupScheduled;
           await launchRepository(ctx, handoff, config, decision.match.repository);
           return;
         }
         const repository = await pickRepository(ctx, decision.ranked.map((match) => match.repository), query);
         if (repository) {
+          await cleanupScheduled;
           await launchRepository(ctx, handoff, config, repository);
+        } else {
+          await cleanupScheduled;
         }
       } catch (error) {
         reportError(ctx, error);
